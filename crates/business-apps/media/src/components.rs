@@ -13,18 +13,29 @@ pub async fn media_grid(items: &[MediaItem]) -> Result {
     view! {
         <ul class="media-grid">
             for (index, item) in items.iter().enumerate() {
-                <li class="media-card" data-index=(index)>
-                    <h2 class="media-title">(item.title.clone())</h2>
-                    <p class="media-meta">
-                        "Released: "
-                        (item.release_year)
-                    </p>
-                    <p class="media-meta">
-                        "Duration: "
-                        if let Some(secs) = item.duration_sec {
-                            (format_secs(secs))
-                        }
-                    </p>
+                <li>
+                    <a
+                        class="media-card"
+                        data-index=(index)
+                        href=(
+                            match item.media_item_id.as_deref() {
+                                Some(id) => "/media-library/".to_owned() + id,
+                                None => "/media-library".to_owned(),
+                            }
+                        )
+                    >
+                        <h2 class="media-title">(item.title.clone())</h2>
+                        <p class="media-meta">
+                            "Released: "
+                            (item.release_year)
+                        </p>
+                        <p class="media-meta">
+                            "Duration: "
+                            if let Some(secs) = item.duration_sec {
+                                (format_secs(secs))
+                            }
+                        </p>
+                    </a>
                 </li>
             }
         </ul>

@@ -3097,6 +3097,7 @@ dependencies = [
  "topcoat-core-macro",
  "topcoat-font",
  "topcoat-font-macro",
+ "topcoat-htmx",
  "topcoat-icon",
  "topcoat-icon-macro",
  "topcoat-mail",
@@ -3220,6 +3221,19 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "topcoat-font-grammar",
+]
+
+[[package]]
+name = "topcoat-htmx"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "114f457f183231c6234f2a65dc894ed8d1fc26545c6a91f3dc3094731f7e91f8"
+dependencies = [
+ "http 1.5.0",
+ "serde",
+ "serde_json",
+ "topcoat-core",
+ "topcoat-router",
 ]
 
 [[package]]

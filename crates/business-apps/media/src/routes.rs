@@ -3,6 +3,12 @@
 //! Each handler pulls the shared `Db`/`Storage` clients from the request
 //! context (`platform_core`), runs one of the app-owned queries from
 //! [`crate::models`], and renders the result with `view!`.
+//!
+//! These handlers render content fragments only — the document shell (styles,
+//! htmx, top bar) comes from the `#[layout("/")]` in `apps/lan`. When the
+
+//! layout sees an htmx request it returns the fragment alone, so the
+//! `hx-get` refresh button below swaps just its section.
 
 use topcoat::{
     Result,
@@ -25,21 +31,21 @@ async fn media_home(cx: &Cx) -> Result {
     let count: models::MediaLibraryCount = db.query(models::count_library()?).await?;
 
     view! {
-        <!DOCTYPE html>
-        <html>
-            <head>
-                <title>"Media Library"</title>
-            </head>
-            <body>
-                <header>
-                    <h1>"Media Library"</h1>
-                    <p>"Your library holds " (count.total) " titles."</p>
-                </header>
-                <main>
-                    components::media_grid(items: &library.items)
-                </main>
-            </body>
-        </html>
+        <header class="media-header">
+            <h1>"Media Library"</h1>
+            <p>"Your library holds " (count.total) " titles."</p>
+            <button
+                class="refresh"
+                hx-get="/media-library"
+                hx-target="#main-content"
+                hx-swap="innerHTML"
+            >
+                "Refresh"
+            </button>
+        </header>
+        <main>
+            components::media_grid(items: &library.items)
+        </main>
     }
 }
 
@@ -59,20 +65,13 @@ async fn media_detail(cx: &Cx) -> Result {
     };
 
     view! {
-        <!DOCTYPE html>
-        <html>
-            <head>
-                <title>"Media item"</title>
-            </head>
-            <body>
-                match item {
-                    Some(item) => {
-                        <h1>"Now playing"</h1>
-                        components::player(item: item, stream_url: stream_url.as_deref())
-                    },
-                    None => <p>"Item not found"</p>,
-                }
-            </body>
-        </html>
+        <a class="back" href="/media-library">"← Back to library"</a>
+        match item {
+            Some(item) => {
+                <h1>"Now playing"</h1>
+                components::player(item: item, stream_url: stream_url.as_deref())
+            },
+            None => <p class="media-empty">"Item not found"</p>,
+        }
     }
 }
