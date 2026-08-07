@@ -1,0 +1,24 @@
+[package]
+name = "media-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Media server business app: films, songs, downloads"
+
+[lib]
+name = "media_app"
+path = "src/lib.rs"
+
+[dependencies]
+topcoat = { workspace = true }
+app-contract = { path = "../app-contract" }
+platform-core = { path = "../../platform/core" }
+db = { path = "../../db" }
+storage = { path = "../../storage" }
+helix-db = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+bytes = { workspace = true }
+
+[lints]
+workspace = true

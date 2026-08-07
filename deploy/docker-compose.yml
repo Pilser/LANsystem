@@ -1,0 +1,50 @@
+# LANsystem project binary
+#
+# The HelixDB graph + its MinIO object store are provisioned by the helix CLI
+# (`helix start LANsystem`), NOT by this file. This file only runs the LAN
+# application binary. It attaches to the same Docker network so the app can
+# reach:
+#
+#   helix  -> http://helix-LANsystem-LANsystem:8080   (gateway, POST /v2/query)
+#   minio  -> http://helix-LANsystem-LANsystem-minio:9000 (S3, creds from
+#                                                        `docker inspect` below)
+#
+# The binary itself is bind-mounted from the host build (target/release/lan),
+# so you rebuild with `cargo build --release` and restart this service.
+#
+# Bring it up:   docker compose -f deploy/docker-compose.yml up -d
+# Restart:       docker compose -f deploy/docker-compose.yml restart
+# Logs:          docker compose -f deploy/docker-compose.yml logs -f
+# Tear it down:  docker compose -f deploy/docker-compose.yml down
+
+services:
+  lan:
+    image: ubuntu:26.04
+    restart: unless-stopped
+    networks:
+      - helix-net
+    ports:
+      - "127.0.0.1:4321:3000"
+    volumes:
+      - ../target/release/lan:/usr/local/bin/lan:ro
+    entrypoint: ["/bin/sh", "-c", "apt-get update -qq && apt-get install -y -qq ca-certificates >/dev/null 2>&1 && /usr/local/bin/lan"]
+    environment:
+      # --- Helix graph DB (in-container gateway, host port 6969) ---
+      HELIX_ENDPOINT: http://helix-LANsystem-LANsystem:8080
+      HELIX_QUERY_PATH: v2/query
+      # --- S3 object storage (MinIO co-deployed by the helix CLI) ---
+      # creds: minioadmin / minioadmin (root user set by helix CLI launch)
+      RUSTFS_ENDPOINT: http://helix-LANsystem-LANsystem-minio:9000
+      RUSTFS_REGION: us-east-1
+      RUSTFS_ACCESS_KEY: minioadmin
+      RUSTFS_SECRET_KEY: minioadmin
+      RUSTFS_BUCKET: lan
+      RUSTFS_PATH_STYLE: "true"
+      # --- app port ---
+      HOST: 0.0.0.0
+      PORT: "3000"
+
+networks:
+  helix-net:
+    external: true
+    name: helix-LANsystem-LANsystem-net

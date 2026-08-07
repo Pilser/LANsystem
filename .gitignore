@@ -1,0 +1,15 @@
+# --- Instance state (helix CLI) ---
+.helix/
+
+# --- Build artifacts ---
+target/
+
+# --- Vendored reference repos (own git history; never track) ---
+helix-db/
+topcoat/
+
+# --- Logs / editor / OS ---
+*.log
+.vscode/
+.idea/
+.DS_Store

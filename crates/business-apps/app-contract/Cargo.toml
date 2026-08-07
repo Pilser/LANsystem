@@ -1,0 +1,15 @@
+[package]
+name = "app-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BusinessApp plugin contract + installed-app registry"
+
+[lib]
+name = "app_contract"
+path = "src/lib.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

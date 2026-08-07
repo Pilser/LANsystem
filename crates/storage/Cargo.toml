@@ -1,0 +1,22 @@
+[package]
+name = "storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RustFS/S3 object-storage client wrapper (put/get/delete/presign)"
+
+[lib]
+name = "storage"
+path = "src/lib.rs"
+
+[dependencies]
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-credential-types = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+thiserror = "1"
+tokio = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "platform-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Glue crate: Topcoat AppContext bootstrap over db + storage"
+
+[lib]
+name = "platform_core"
+path = "src/lib.rs"
+
+[dependencies]
+topcoat = { workspace = true }
+db = { path = "../../db" }
+storage = { path = "../../storage" }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

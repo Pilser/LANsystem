@@ -1,0 +1,12 @@
+[project]
+name = "LANsystem"
+queries = "db"
+container_runtime = "docker"
+
+[local.LANsystem]
+port = 6969
+image = "ghcr.io/helixdb/helixdb"
+tag = "v0.0.3"
+storage = "disk"
+
+[enterprise]
