@@ -11,12 +11,11 @@ use crate::models::MediaItem;
 #[component]
 pub async fn media_grid(items: &[MediaItem]) -> Result {
     view! {
-        <ul class="media-grid">
-            for (index, item) in items.iter().enumerate() {
+        <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+            for item in items.iter() {
                 <li>
                     <a
-                        class="media-card"
-                        data-index=(index)
+                        class="block rounded-xl border border-zinc-800 bg-zinc-900 p-5 transition hover:-translate-y-0.5 hover:border-sky-400"
                         href=(
                             match item.media_item_id.as_deref() {
                                 Some(id) => "/media-library/".to_owned() + id,
@@ -24,12 +23,14 @@ pub async fn media_grid(items: &[MediaItem]) -> Result {
                             }
                         )
                     >
-                        <h2 class="media-title">(item.title.clone())</h2>
-                        <p class="media-meta">
+                        <h2 class="mb-2 text-lg font-semibold text-zinc-100">
+                            (item.title.clone())
+                        </h2>
+                        <p class="text-sm text-zinc-400">
                             "Released: "
                             (item.release_year)
                         </p>
-                        <p class="media-meta">
+                        <p class="text-sm text-zinc-400">
                             "Duration: "
                             if let Some(secs) = item.duration_sec {
                                 (format_secs(secs))
@@ -46,9 +47,15 @@ pub async fn media_grid(items: &[MediaItem]) -> Result {
 #[component]
 pub async fn player(item: &MediaItem, stream_url: Option<&str>) -> Result {
     view! {
-        <figure class="media-player">
-            <figcaption>(item.title.clone())</figcaption>
-            <video src=(stream_url) controls=""></video>
+        <figure class="mt-8">
+            <figcaption class="mb-3 text-lg font-semibold">
+                (item.title.clone())
+            </figcaption>
+            <video
+                class="block w-full max-w-3xl rounded-xl bg-black"
+                src=(stream_url)
+                controls=""
+            ></video>
         </figure>
     }
 }

@@ -6,7 +6,6 @@
 //!
 //! These handlers render content fragments only — the document shell (styles,
 //! htmx, top bar) comes from the `#[layout("/")]` in `apps/lan`. When the
-
 //! layout sees an htmx request it returns the fragment alone, so the
 //! `hx-get` refresh button below swaps just its section.
 
@@ -31,20 +30,28 @@ async fn media_home(cx: &Cx) -> Result {
     let count: models::MediaLibraryCount = db.query(models::count_library()?).await?;
 
     view! {
-        <header class="media-header">
-            <h1>"Media Library"</h1>
-            <p>"Your library holds " (count.total) " titles."</p>
+        <div class="mb-8 flex flex-wrap items-baseline gap-4">
+            <h1 class="text-3xl font-bold">"Media Library"</h1>
+            <p class="text-sm text-zinc-400">
+                "Your library holds " (count.total) " titles."
+            </p>
             <button
-                class="refresh"
+                class="ml-auto cursor-pointer rounded-md border border-zinc-700 bg-zinc-800 px-4 py-1.5 text-sm text-zinc-100 transition hover:border-sky-400"
                 hx-get="/media-library"
                 hx-target="#main-content"
                 hx-swap="innerHTML"
             >
                 "Refresh"
             </button>
-        </header>
+        </div>
         <main>
-            components::media_grid(items: &library.items)
+            if library.items.is_empty() {
+                <p class="py-10 text-sm text-zinc-400">
+                    "Nothing in the library yet — upload files to get started."
+                </p>
+            } else {
+                components::media_grid(items: &library.items)
+            }
         </main>
     }
 }
@@ -65,13 +72,15 @@ async fn media_detail(cx: &Cx) -> Result {
     };
 
     view! {
-        <a class="back" href="/media-library">"← Back to library"</a>
+        <a class="mb-4 inline-block text-sm text-sky-400 hover:text-sky-300" href="/media-library">
+            "← Back to library"
+        </a>
         match item {
             Some(item) => {
-                <h1>"Now playing"</h1>
+                <h1 class="text-3xl font-bold">"Now playing"</h1>
                 components::player(item: item, stream_url: stream_url.as_deref())
             },
-            None => <p class="media-empty">"Item not found"</p>,
+            None => <p class="py-10 text-sm text-zinc-400">"Item not found"</p>,
         }
     }
 }
