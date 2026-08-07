@@ -15,6 +15,8 @@ platform-core = { path = "../../crates/platform/core" }
 app-contract = { path = "../../crates/business-apps/app-contract" }
 media-app = { path = "../../crates/business-apps/media" }
 tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [lints]
 workspace = true

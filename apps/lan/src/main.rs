@@ -9,6 +9,13 @@ use topcoat::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "lan=info,platform_core=info,db=info,storage=info,tower_http=info".into()),
+        )
+        .init();
+
     let services = match platform_core::Services::connect().await {
         Ok(services) => services,
         Err(error) => {
@@ -20,6 +27,7 @@ async fn main() -> Result<()> {
             return Err(error.into());
         }
     };
+    tracing::info!("connected: db + storage ready");
 
     let mut registry = AppRegistry::new();
     registry.push(media_app::Media);

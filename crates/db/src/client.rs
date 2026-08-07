@@ -91,11 +91,13 @@ impl Db {
             builder = builder.bearer_auth(api_key);
         }
 
+        tracing::debug!(url = %url, "db: sending query");
         let response = builder.send().await?;
         let status = response.status();
         let bytes = response.bytes().await?;
 
         if !status.is_success() {
+            tracing::warn!(url = %url, status = %status, "db: gateway error");
             return Err(crate::Error::server(status, &bytes));
         }
 
