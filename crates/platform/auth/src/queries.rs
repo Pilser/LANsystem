@@ -232,8 +232,7 @@ pub fn upsert_tenant_by_name(
         .var_as(
             "existing",
             g().n_with_label(labels::TENANT)
-                .where_(Predicate::eq(props::TENANT_NAME, tenant_name))
-                .project(vec![PropertyProjection::new(props::TENANT_NAME)]),
+                .where_(Predicate::eq(props::TENANT_NAME, tenant_name)),
         )
         .var_as_if(
             "created",
@@ -250,7 +249,16 @@ pub fn upsert_tenant_by_name(
                 ],
             ),
         )
-        .returning(["created"])
+        .var_as_if(
+            "updated",
+            BatchCondition::VarNotEmpty("existing".to_string()),
+            g().n(NodeRef::var("existing"))
+                .set_property(props::TENANT_ID, PropertyInput::param("tenant_id"))
+                .set_property(props::STORAGE_QUOTA_BYTES, PropertyInput::param("quota_bytes"))
+                .set_property(props::APPS_ENABLED, PropertyInput::param("apps_enabled"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
+        )
+        .returning(["created", "updated"])
 }
 
 /// Set a tenant's `status` (active / suspended).
@@ -324,8 +332,7 @@ pub fn upsert_user(
         .var_as(
             "existing",
             g().n_with_label(labels::USER)
-                .where_(Predicate::eq(props::USERNAME, username))
-                .project(vec![PropertyProjection::new(props::USER_ID)]),
+                .where_(Predicate::eq(props::USERNAME, username)),
         )
         .var_as_if(
             "created",

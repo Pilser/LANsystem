@@ -8,7 +8,7 @@
 
 use db::query;
 use db::schema::{edges, labels, props};
-use db::{g, read_batch, NodeRef, Order, Predicate, PropertyProjection};
+use db::{g, read_batch, write_batch, Expr, NodeRef, Order, Predicate, PropertyInput, PropertyProjection};
 
 /// A single media item row as projected by the media queries.
 ///
@@ -163,4 +163,80 @@ pub fn media_item_by_id(media_item_id: String) -> db::ReadBatch {
                 ]),
         )
         .returning(["item"])
+}
+
+/// A tenant's storage accounting, read before an upload so the quota gate can
+/// be enforced at the app layer.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantStorage {
+    pub storage_quota_bytes: Option<i64>,
+    pub storage_used_bytes: Option<i64>,
+}
+
+/// Response shape of [`tenant_storage_info`].
+#[derive(Debug, serde::Deserialize)]
+pub struct TenantStorageInfo {
+    pub tenant: Vec<TenantStorage>,
+}
+
+#[query]
+pub fn tenant_storage_info(tenant_id: i64) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "tenant",
+            g().n_with_label(labels::TENANT)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .project(vec![
+                    PropertyProjection::new(props::STORAGE_QUOTA_BYTES),
+                    PropertyProjection::new(props::STORAGE_USED_BYTES),
+                ]),
+        )
+        .returning(["tenant"])
+}
+
+/// Create a media item row that points at an object already stored in S3.
+/// `tenant_id` 0 = platform-level item (owner upload).
+#[query]
+pub fn create_media_item(
+    media_item_id: String,
+    title: String,
+    release_year: i64,
+    duration_sec: i64,
+    stream_key: String,
+    tenant_id: i64,
+) -> db::WriteBatch {
+    write_batch()
+        .var_as(
+            "item",
+            g().add_n(
+                labels::MEDIA_ITEM,
+                vec![
+                    (props::MEDIA_ITEM_ID, PropertyInput::param("media_item_id")),
+                    (props::TITLE, PropertyInput::param("title")),
+                    (props::RELEASE_YEAR, PropertyInput::param("release_year")),
+                    (props::DURATION_SEC, PropertyInput::param("duration_sec")),
+                    (props::STREAM_KEY, PropertyInput::param("stream_key")),
+                    (props::TENANT_ID, PropertyInput::param("tenant_id")),
+                    (props::STATUS, PropertyInput::from("active")),
+                    (props::CREATED_AT, PropertyInput::Expr(Expr::timestamp())),
+                    (props::UPDATED_AT, PropertyInput::Expr(Expr::timestamp())),
+                ],
+            ),
+        )
+        .returning(["item"])
+}
+
+/// Carry a tenant's `storageUsedBytes` after an upload.
+#[query]
+pub fn set_tenant_used_bytes(tenant_id: i64, used_bytes: i64) -> db::WriteBatch {
+    write_batch()
+        .var_as(
+            "tenant",
+            g().n_with_label(labels::TENANT)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .set_property(props::STORAGE_USED_BYTES, PropertyInput::param("used_bytes"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
+        )
+        .returning(["tenant"])
 }

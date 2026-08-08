@@ -54,13 +54,16 @@ pub struct UserIdForm {
     pub user_id: String,
 }
 
-/// Create a tenant (owner only).
+/// Create or update a tenant (`tenant_id` absent = create).
 #[derive(Deserialize)]
 pub struct SaveTenantForm {
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     pub tenant_name: String,
     pub storage_quota_gib: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_apps")]
     pub apps_enabled: Vec<String>,
+    #[serde(default)]
     pub billing_enabled: Option<String>,
     #[serde(default)]
     pub auth_webhook_url: String,
@@ -127,6 +130,7 @@ async fn console(cx: &Cx) -> Result {
                                                 if tenant.is_active() { "active" } else { "suspended" }
                                             </span>
                                             <span>"quota " (quota_text(tenant.storage_quota_bytes))</span>
+                                            <span>(usage_text(tenant.storage_used_bytes))</span>
                                             <span>"apps: " (apps_text(tenant.apps_enabled.as_deref()))</span>
                                             <span>(billing_text(tenant.billing_enabled, tenant.auth_webhook_url.as_deref()))</span>
                                         </div>
@@ -140,6 +144,40 @@ async fn console(cx: &Cx) -> Result {
                                         </button>
                                     </form>
                                 </div>
+                                <form
+                                    method="post"
+                                    action="/admin/tenants/save"
+                                    class="mt-4 flex flex-wrap items-end gap-3 border-t border-zinc-800 pt-3"
+                                >
+                                    <input type="hidden" name="tenant_id" value=(id_text(tenant.tenant_id)) />
+                                    <input type="hidden" name="tenant_name" value=(tenant.tenant_name.as_deref().unwrap_or_default()) />
+                                    <label class="flex flex-col gap-1 text-xs text-zinc-400">
+                                        "Quota (GiB)"
+                                        <input type="number" name="storage_quota_gib" min="1"
+                                            value=(quota_gib(tenant.storage_quota_bytes))
+                                            class="w-24 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-400" />
+                                    </label>
+                                    <label class="flex h-8 items-center gap-2 text-xs text-zinc-300">
+                                        <input type="checkbox" name="apps_enabled" value="media" checked=(tenant.has_app("media"))
+                                            class="h-4 w-4 accent-sky-500" />
+                                        "Media Library"
+                                    </label>
+                                    <label class="flex h-8 items-center gap-2 text-xs text-zinc-300">
+                                        <input type="checkbox" name="billing_enabled" value="on" checked=(tenant.billing_enabled == Some(true))
+                                            class="h-4 w-4 accent-sky-500" />
+                                        "Billing webhook"
+                                    </label>
+                                    <label class="flex flex-col gap-1 text-xs text-zinc-400">
+                                        "AAA webhook URL"
+                                        <input name="auth_webhook_url" value=(tenant.auth_webhook_url.as_deref().unwrap_or_default())
+                                            class="w-56 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-400" />
+                                    </label>
+                                    <button
+                                        class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-sky-400"
+                                    >
+                                        "Save settings"
+                                    </button>
+                                </form>
                             </li>
                         }
                     </ul>
@@ -382,7 +420,8 @@ pub async fn users_drop(
     Ok(see_other("/admin"))
 }
 
-/// `POST /admin/tenants/save`: create a tenant (owner only).
+/// `POST /admin/tenants/save`: create a tenant, or update its name/settings
+/// when `tenant_id` is present (owner only).
 #[route(POST "/admin/tenants/save")]
 pub async fn tenants_save(Form(form): Form<SaveTenantForm>, cx: &Cx) -> Result<SeeOther> {
     let auth = platform_core::auth(cx);
@@ -392,7 +431,7 @@ pub async fn tenants_save(Form(form): Form<SaveTenantForm>, cx: &Cx) -> Result<S
     }
     let quota = form.storage_quota_gib.saturating_mul(1 << 30);
     auth.save_tenant(
-        None,
+        optional_i64(form.tenant_id),
         form.tenant_name.clone(),
         quota,
         form.apps_enabled.clone(),
@@ -434,6 +473,27 @@ const ROLE_OPTIONS: &[(&str, &str)] = &[
     ("member", "Member"),
 ];
 
+/// Form codecs give a single value for one checkbox and a sequence for
+/// several; accept both.
+fn deserialize_apps<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(value) => vec![value],
+        OneOrMany::Many(values) => values,
+    })
+}
+
 /// Parse an optional id from a form string (`""` or `None` → `None`).
 fn optional_i64(raw: Option<String>) -> Option<i64> {
     raw.and_then(|s| if s.is_empty() { None } else { s.parse().ok() })
@@ -466,6 +526,16 @@ fn status_class(active: bool) -> &'static str {
 
 fn quota_text(bytes: Option<i64>) -> String {
     bytes.map_or_else(|| "—".into(), |bytes| format!("{} MiB", bytes / 1024 / 1024))
+}
+
+fn quota_gib(bytes: Option<i64>) -> i64 {
+    bytes.map_or(2, |bytes| (bytes >> 30).max(1))
+}
+
+fn usage_text(bytes: Option<i64>) -> String {
+    bytes
+        .filter(|bytes| *bytes > 0)
+        .map_or_else(|| "unused".into(), |bytes| format!("{} MiB used", bytes / 1024 / 1024))
 }
 
 fn apps_text(apps: Option<&[String]>) -> String {

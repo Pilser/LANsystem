@@ -7,7 +7,7 @@ use topcoat::{
     context::{app_context, Cx},
     cookie::RouterBuilderCookieExt,
     htmx::hx_request,
-    router::{Router, RouterBuilderDiscoverExt, layout, page},
+    router::{BodyLimit, Router, RouterBuilderDiscoverExt, layout, page},
     session::RouterBuilderSessionExt,
     view::view,
 };
@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
                     .lifetime(Duration::from_secs(7 * 24 * 60 * 60))
                     .build(),
             )
+            .layer(BodyLimit::max(8 * 1024 * 1024 * 1024).at("/media-library/upload"))
             .build(),
     )
     .await?;

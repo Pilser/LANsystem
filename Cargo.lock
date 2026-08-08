@@ -1895,6 +1895,7 @@ dependencies = [
  "helix-db",
  "platform-core",
  "serde",
+ "serde_json",
  "storage",
  "tokio",
  "topcoat",

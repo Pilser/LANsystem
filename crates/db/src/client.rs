@@ -80,6 +80,7 @@ impl Db {
     {
         let url = format!("{}/{}", self.config.endpoint, self.config.query_path);
         let body = request.to_json_bytes()?;
+        tracing::debug!(url = %url, body = %String::from_utf8_lossy(&body), "db: sending query");
 
         let mut builder = self
             .http
@@ -91,13 +92,17 @@ impl Db {
             builder = builder.bearer_auth(api_key);
         }
 
-        tracing::debug!(url = %url, "db: sending query");
         let response = builder.send().await?;
         let status = response.status();
         let bytes = response.bytes().await?;
 
         if !status.is_success() {
-            tracing::warn!(url = %url, status = %status, "db: gateway error");
+            tracing::warn!(
+                url = %url,
+                status = %status,
+                body = %String::from_utf8_lossy(&bytes[..bytes.len().min(512)]),
+                "db: gateway error"
+            );
             return Err(crate::Error::server(status, &bytes));
         }
 

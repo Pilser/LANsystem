@@ -135,6 +135,13 @@ impl Tenant {
     pub fn is_active(&self) -> bool {
         self.status == TENANT_STATUS_ACTIVE
     }
+
+    /// Whether this tenant may use `app_id` (via `appsEnabled`).
+    pub fn has_app(&self, app_id: &str) -> bool {
+        self.apps_enabled
+            .as_deref()
+            .is_some_and(|apps| apps.iter().any(|enabled| enabled == app_id))
+    }
 }
 
 /// One `Session` node row: the persisted token hash + expiry bound to a user.

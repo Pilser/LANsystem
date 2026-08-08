@@ -24,6 +24,18 @@ cargo build --release -p lan
 docker compose -f deploy/docker-compose.yml up -d   # app on 127.0.0.1:4321
 ```
 
+After a rebuild only the binary changed, and it's bind-mounted — **never
+`--force-recreate`** the app container; just restart it:
+
+```bash
+docker compose -f deploy/docker-compose.yml restart lan
+```
+
+Recreate only churns apt-get in the entrypoint (`ca-certificates` reinstall,
+flaky container DNS) and stalls the app longer. The entrypoint's apt step is
+the cause of slow boots; wait for "connected: db + storage + auth ready" in
+logs before probing.
+
 Env the app needs: `HELIX_ENDPOINT=http://helix-LANsystem-LANsystem:8080`,
 `HELIX_QUERY_PATH=v2/query`, `RUSTFS_ENDPOINT/REGION/ACCESS_KEY/SECRET_KEY/BUCKET`
 (creds `minioadmin`/`minioadmin`, bucket `lan`).

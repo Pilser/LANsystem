@@ -8,5 +8,6 @@ pub mod error;
 mod services;
 
 pub use error::{Error, Result};
+pub use platform_auth::authorizer::AuthDecision;
 pub use platform_auth::Auth;
 pub use services::{auth, db, services, storage, Services};
