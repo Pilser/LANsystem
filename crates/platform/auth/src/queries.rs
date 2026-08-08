@@ -2,6 +2,7 @@
 //!
 //! Anchor narrow, filter tenant first, prefer `write_batch()` for mutations.
 
+use crate::models::TENANT_STATUS_ACTIVE;
 use db::query;
 use db::schema::{labels, props};
 use db::{
@@ -161,6 +162,8 @@ pub fn all_tenants() -> ReadBatch {
                     PropertyProjection::new(props::STORAGE_USED_BYTES),
                     PropertyProjection::new(props::BILLING_ENABLED),
                     PropertyProjection::new(props::AUTH_WEBHOOK_URL),
+                    PropertyProjection::new(props::IS_PUBLIC),
+                    PropertyProjection::new(props::DESCRIPTION),
                     PropertyProjection::new(props::CREATED_AT),
                 ]),
         )
@@ -184,6 +187,8 @@ pub fn tenant_by_id(tenant_id: i64) -> ReadBatch {
                     PropertyProjection::new(props::STORAGE_USED_BYTES),
                     PropertyProjection::new(props::BILLING_ENABLED),
                     PropertyProjection::new(props::AUTH_WEBHOOK_URL),
+                    PropertyProjection::new(props::IS_PUBLIC),
+                    PropertyProjection::new(props::DESCRIPTION),
                     PropertyProjection::new(props::CREATED_AT),
                 ]),
         )
@@ -298,6 +303,44 @@ pub fn set_tenant_apps(tenant_id: i64, apps: Vec<String>) -> WriteBatch {
             g().n_with_label(labels::TENANT)
                 .where_(Predicate::eq(props::TENANT_ID, tenant_id))
                 .set_property(props::APPS_ENABLED, PropertyInput::param("apps")),
+        )
+        .returning(["tenant"])
+}
+
+/// Tenants listed in the public service directory: visible + active, with
+/// just the fields the directory cards render.
+#[query]
+pub fn public_tenants() -> ReadBatch {
+    read_batch()
+        .var_as(
+            "tenants",
+            g().n_with_label(labels::TENANT)
+                .where_(Predicate::eq(props::IS_PUBLIC, true))
+                .where_(Predicate::eq(props::STATUS, TENANT_STATUS_ACTIVE))
+                .order_by(props::CREATED_AT, Order::Asc)
+                .limit(200usize)
+                .project(vec![
+                    PropertyProjection::new(props::TENANT_ID),
+                    PropertyProjection::new(props::TENANT_NAME),
+                    PropertyProjection::new(props::APPS_ENABLED),
+                    PropertyProjection::new(props::DESCRIPTION),
+                    PropertyProjection::new(props::IS_PUBLIC),
+                ]),
+        )
+        .returning(["tenants"])
+}
+
+/// Toggle visibility and tagline used by the directory page.
+#[query]
+pub fn set_tenant_visibility(tenant_id: i64, is_public: bool, description: String) -> WriteBatch {
+    write_batch()
+        .var_as(
+            "tenant",
+            g().n_with_label(labels::TENANT)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .set_property(props::IS_PUBLIC, PropertyInput::param("is_public"))
+                .set_property(props::DESCRIPTION, PropertyInput::param("description"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
         )
         .returning(["tenant"])
 }

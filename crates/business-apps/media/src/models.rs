@@ -25,6 +25,8 @@ pub struct MediaItem {
     /// The tenant that owns this item; `None`/absent = platform item only
     /// visible to the platform owner.
     pub tenant_id: Option<i64>,
+    /// Tenant-admin controlled: shown on the tenant's public surface.
+    pub is_public: Option<bool>,
 }
 
 /// Response shape of [`list_library`].
@@ -67,6 +69,7 @@ pub fn list_library() -> db::ReadBatch {
                     PropertyProjection::new(props::DURATION_SEC),
                     PropertyProjection::new(props::STREAM_KEY),
                     PropertyProjection::new(props::TENANT_ID),
+                    PropertyProjection::new(props::IS_PUBLIC),
                 ]),
         )
         .returning(["items"])
@@ -89,6 +92,7 @@ pub fn list_library_by_tenant(tenant_id: i64) -> db::ReadBatch {
                     PropertyProjection::new(props::DURATION_SEC),
                     PropertyProjection::new(props::STREAM_KEY),
                     PropertyProjection::new(props::TENANT_ID),
+                    PropertyProjection::new(props::IS_PUBLIC),
                 ]),
         )
         .returning(["items"])
@@ -160,6 +164,7 @@ pub fn media_item_by_id(media_item_id: String) -> db::ReadBatch {
                     PropertyProjection::new(props::DURATION_SEC),
                     PropertyProjection::new(props::STREAM_KEY),
                     PropertyProjection::new(props::TENANT_ID),
+                    PropertyProjection::new(props::IS_PUBLIC),
                 ]),
         )
         .returning(["item"])
@@ -239,4 +244,65 @@ pub fn set_tenant_used_bytes(tenant_id: i64, used_bytes: i64) -> db::WriteBatch 
                 .set_property(props::UPDATED_AT, Expr::timestamp()),
         )
         .returning(["tenant"])
+}
+/// The most recent public item of a tenant, used as the directory card
+/// thumbnail.
+#[query]
+pub fn first_public_item_by_tenant(tenant_id: i64) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "item",
+            g().n_with_label(labels::MEDIA_ITEM)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .where_(Predicate::eq(props::IS_PUBLIC, true))
+                .where_(Predicate::is_null(props::DELETED_AT))
+                .order_by(props::CREATED_AT, Order::Desc)
+                .limit(1usize)
+                .project(vec![
+                    PropertyProjection::new(props::MEDIA_ITEM_ID),
+                    PropertyProjection::new(props::TITLE),
+                    PropertyProjection::new(props::STREAM_KEY),
+                ]),
+        )
+        .returning(["item"])
+}
+
+/// Published, live titles of a tenant, shown to guests on its space page.
+#[query]
+pub fn public_items_by_tenant(tenant_id: i64) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "items",
+            g().n_with_label(labels::MEDIA_ITEM)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .where_(Predicate::eq(props::IS_PUBLIC, true))
+                .where_(Predicate::is_null(props::DELETED_AT))
+                .order_by(props::RELEASE_YEAR, Order::Desc)
+                .limit(100usize)
+                .project(vec![
+                    PropertyProjection::new(props::MEDIA_ITEM_ID),
+                    PropertyProjection::new(props::TITLE),
+                    PropertyProjection::new(props::RELEASE_YEAR),
+                    PropertyProjection::new(props::DURATION_SEC),
+                    PropertyProjection::new(props::STREAM_KEY),
+                    PropertyProjection::new(props::TENANT_ID),
+                    PropertyProjection::new(props::IS_PUBLIC),
+                ]),
+        )
+        .returning(["items"])
+}
+
+/// Tenant-admin controlled: publish / unpublish a single item. Only the
+/// owning tenant's admins (or the platform owner) reach this query.
+#[query]
+pub fn set_item_public(media_item_id: String, is_public: bool) -> db::WriteBatch {
+    write_batch()
+        .var_as(
+            "item",
+            g().n_with_label(labels::MEDIA_ITEM)
+                .where_(Predicate::eq(props::MEDIA_ITEM_ID, media_item_id))
+                .set_property(props::IS_PUBLIC, PropertyInput::param("is_public"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
+        )
+        .returning(["item"])
 }

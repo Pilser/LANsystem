@@ -334,6 +334,26 @@ impl Auth {
         Ok(())
     }
 
+    /// Show/hide a tenant in the public service directory (with tagline).
+    pub async fn set_tenant_visibility(
+        &self,
+        tenant_id: i64,
+        is_public: bool,
+        tagline: String,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_tenant_visibility(tenant_id, is_public, tagline)?)
+            .await?;
+        Ok(())
+    }
+
+    /// Tenants visible on the public directory page (active + `isPublic`).
+    pub async fn public_tenants(&self) -> Result<Vec<Tenant>> {
+        let rows: TenantsRows = self.db.query(queries::public_tenants()?).await?;
+        Ok(rows.tenants)
+    }
+
     pub async fn set_user_active(&self, user_id: i64, active: bool) -> Result<()> {
         let status = if active { "active" } else { "suspended" };
         let _: serde_json::Value = self

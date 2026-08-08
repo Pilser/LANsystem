@@ -1,13 +1,12 @@
 use std::time::Duration;
 
 use app_contract::AppRegistry;
-use platform_auth::Role;
 use topcoat::{
     Result,
     context::{app_context, Cx},
     cookie::RouterBuilderCookieExt,
     htmx::hx_request,
-    router::{BodyLimit, Router, RouterBuilderDiscoverExt, layout, page},
+    router::{BodyLimit, Router, RouterBuilderDiscoverExt, error::{redirect, see_other}, layout, page, request::uri},
     session::RouterBuilderSessionExt,
     view::view,
 };
@@ -74,6 +73,7 @@ async fn root(cx: &Cx, slot: Result) -> Result {
     }
 
     let current = platform_core::auth(cx).current_user(cx).await?;
+    let on_console = uri(cx).path().starts_with("/admin");
 
     view! {
         <!DOCTYPE html>
@@ -93,24 +93,47 @@ async fn root(cx: &Cx, slot: Result) -> Result {
                     <header
                         class="mb-8 flex items-center gap-4 border-b border-zinc-800 py-4"
                     >
-                        <a class="text-lg font-bold text-zinc-100" href="/">
-                            "LANsystem"
-                        </a>
-                        <nav class="flex gap-4 text-sm text-zinc-400">
-                            <a class="hover:text-zinc-100" href="/">"Launcher"</a>
-                            <a class="hover:text-zinc-100" href="/media-library">"Media Library"</a>
-                            match &current {
-                                Some(user) if user.user.role().is_at_least(Role::TenantAdmin) => {
+                        match &current {
+                            None => {
+                                <div class="ml-auto flex items-center gap-3 text-sm">
+                                    <a
+                                        class="rounded-md border border-sky-700 bg-sky-900/40 px-3 py-1 text-sm text-sky-200 transition hover:bg-sky-800/40"
+                                        href="/admin"
+                                    >
+                                        "Console"
+                                    </a>
+                                </div>
+                            },
+Some(_) if on_console => {
+                                <div class="ml-auto flex items-center gap-4 text-sm">
+                                    <a
+                                        class="text-sky-400 hover:text-sky-300"
+                                        href="/"
+                                    >
+                                        "← Back to the launcher"
+                                    </a>
+                                    <form method="post" action="/logout">
+                                        <button
+                                            class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-sm text-zinc-300 transition hover:border-red-400 hover:text-red-300"
+                                        >
+                                            "Sign out"
+                                        </button>
+                                    </form>
+                                </div>
+                            },
+                            Some(_) => {
+                                <a class="text-lg font-bold text-zinc-100" href="/">
+                                    "LANsystem"
+                                </a>
+                                <nav class="flex gap-4 text-sm text-zinc-400">
+                                    <a class="hover:text-zinc-100" href="/">"Launcher"</a>
+                                    <a class="hover:text-zinc-100" href="/public">"Directory"</a>
+                                    <a class="hover:text-zinc-100" href="/media-library">"Media Library"</a>
                                     <a class="hover:text-zinc-100" href="/admin">"Console"</a>
-                                },
-                                _ => {},
-                            }
-                        </nav>
-                        <div class="ml-auto flex items-center gap-3 text-sm">
-                            match &current {
-                                Some(user) => {
+                                </nav>
+                                <div class="ml-auto flex items-center gap-3 text-sm">
                                     <span class="hidden text-zinc-400 sm:inline">
-                                        (user.user.display_name.as_deref().unwrap_or("user"))
+                                        (current.as_ref().and_then(|u| u.user.display_name.as_deref()).unwrap_or("user"))
                                     </span>
                                     <form method="post" action="/logout">
                                         <button
@@ -119,24 +142,21 @@ async fn root(cx: &Cx, slot: Result) -> Result {
                                             "Sign out"
                                         </button>
                                     </form>
-                                },
-                                None => {
-                                    <a
-                                        class="rounded-md border border-sky-700 bg-sky-900/40 px-3 py-1 text-sky-200 transition hover:bg-sky-800/40"
-                                        href="/login"
-                                    >
-                                        "Sign in"
-                                    </a>
-                                },
-                            }
-                        </div>
+                                </div>
+                            },
+                        }
                     </header>
                     <main id="main-content">(slot?)</main>
-                    <footer
-                        class="mt-14 border-t border-zinc-800 pt-4 text-xs text-zinc-500"
-                    >
-                        "LANsystem · a private server on your LAN."
-                    </footer>
+                    match &current {
+                        Some(_) => {
+                            <footer
+                                class="mt-14 border-t border-zinc-800 pt-4 text-xs text-zinc-500"
+                            >
+                                "LANsystem · a private server on your LAN."
+                            </footer>
+                        },
+                        None => {},
+                    }
                 </div>
             </body>
         </html>
@@ -145,6 +165,10 @@ async fn root(cx: &Cx, slot: Result) -> Result {
 
 #[page("/")]
 async fn home(cx: &Cx) -> Result {
+    if platform_core::auth(cx).current_user(cx).await?.is_none() {
+        return Err(redirect("/public").into());
+    }
+
     let registry = app_context::<AppRegistry>(cx);
 
     view! {

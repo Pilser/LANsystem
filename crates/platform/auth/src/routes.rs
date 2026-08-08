@@ -38,6 +38,12 @@ pub async fn login_page(cx: &Cx) -> Result {
 
     view! {
         <div class="mx-auto mt-10 max-w-sm">
+            <a
+                class="mb-4 inline-block text-sm text-sky-400 hover:text-sky-300"
+                href="/public"
+            >
+                "← Back to the directory"
+            </a>
             <h1 class="mb-6 text-2xl font-bold">"Sign in"</h1>
             if failed {
                 <p class="mb-4 rounded-md border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">
@@ -70,16 +76,26 @@ pub async fn login_page(cx: &Cx) -> Result {
                     "Sign in"
                 </button>
             </form>
+            <p class="mt-4 text-xs text-zinc-500">
+                "Don't have an account? Ask the LAN owner to create one."
+            </p>
         </div>
     }
 }
 
-/// `POST /login`: verify credentials and start a session.
+/// `POST /login`: verify credentials and start a session. Staff (the owner
+/// or a tenant admin) land straight into their console; everyone else goes
+/// to the launcher.
 #[route(POST "/login")]
 pub async fn login(Form(form): Form<LoginForm>, cx: &Cx) -> Result<SeeOther> {
     let auth = app_context::<Auth>(cx);
     if auth.login(cx, &form.username, &form.password).await? {
-        Ok(see_other("/"))
+        let is_staff = auth
+            .authenticate(&form.username, &form.password)
+            .await?
+            .map(|user| user.role().is_at_least(crate::models::Role::TenantAdmin))
+            .unwrap_or(false);
+        Ok(see_other(if is_staff { "/admin" } else { "/" }))
     } else {
         Ok(see_other("/login?error=1"))
     }

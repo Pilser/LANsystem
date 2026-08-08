@@ -127,6 +127,12 @@ pub struct Tenant {
     pub storage_used_bytes: Option<i64>,
     pub billing_enabled: Option<bool>,
     pub auth_webhook_url: Option<String>,
+    /// Shows in the public service directory (tenant-admin controlled).
+    #[serde(default)]
+    pub is_public: Option<bool>,
+    /// Tenant tagline shown on directory cards.
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(deserialize_with = "datetime::optional")]
     pub created_at: Option<i64>,
 }

@@ -41,6 +41,9 @@ pub mod props {
     pub const STORAGE_USED_BYTES: &str = "storageUsedBytes";
     pub const BILLING_ENABLED: &str = "billingEnabled";
     pub const AUTH_WEBHOOK_URL: &str = "authWebhookUrl";
+    /// Shared flag: a tenant shows in the public directory, a media item is
+    /// listed on the tenant's public surface.
+    pub const IS_PUBLIC: &str = "isPublic";
     pub const SESSION_ID: &str = "sessionId";
     pub const EXPIRES_AT: &str = "expiresAt";
     pub const NAME: &str = "name";
@@ -179,6 +182,7 @@ pub enum Property {
     StorageUsedBytes,
     BillingEnabled,
     AuthWebhookUrl,
+    IsPublic,
     SessionId,
     ExpiresAt,
     Name,
@@ -222,6 +226,7 @@ impl Property {
             Self::StorageUsedBytes => props::STORAGE_USED_BYTES,
             Self::BillingEnabled => props::BILLING_ENABLED,
             Self::AuthWebhookUrl => props::AUTH_WEBHOOK_URL,
+            Self::IsPublic => props::IS_PUBLIC,
             Self::SessionId => props::SESSION_ID,
             Self::ExpiresAt => props::EXPIRES_AT,
             Self::Name => props::NAME,
@@ -266,6 +271,7 @@ impl From<&str> for Property {
             props::STORAGE_USED_BYTES => Self::StorageUsedBytes,
             props::BILLING_ENABLED => Self::BillingEnabled,
             props::AUTH_WEBHOOK_URL => Self::AuthWebhookUrl,
+            props::IS_PUBLIC => Self::IsPublic,
             props::SESSION_ID => Self::SessionId,
             props::EXPIRES_AT => Self::ExpiresAt,
             props::NAME => Self::Name,

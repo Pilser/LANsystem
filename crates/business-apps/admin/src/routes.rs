@@ -67,6 +67,10 @@ pub struct SaveTenantForm {
     pub billing_enabled: Option<String>,
     #[serde(default)]
     pub auth_webhook_url: String,
+    #[serde(default)]
+    pub is_public: Option<String>,
+    #[serde(default)]
+    pub tagline: String,
 }
 
 /// One tenant's id, for the suspend/activate toggle.
@@ -133,7 +137,13 @@ async fn console(cx: &Cx) -> Result {
                                             <span>(usage_text(tenant.storage_used_bytes))</span>
                                             <span>"apps: " (apps_text(tenant.apps_enabled.as_deref()))</span>
                                             <span>(billing_text(tenant.billing_enabled, tenant.auth_webhook_url.as_deref()))</span>
+                                            <span class=(public_class(tenant.is_public))>
+                                                if tenant.is_public == Some(true) { "in directory" } else { "not listed" }
+                                            </span>
                                         </div>
+                                        <p class="mt-1 text-xs text-zinc-500">
+                                            (tenant.description.as_deref().unwrap_or("No tagline yet"))
+                                        </p>
                                     </div>
                                     <form method="post" action="/admin/tenants/toggle">
                                         <input type="hidden" name="tenant_id" value=(id_text(tenant.tenant_id)) />
@@ -171,6 +181,16 @@ async fn console(cx: &Cx) -> Result {
                                         "AAA webhook URL"
                                         <input name="auth_webhook_url" value=(tenant.auth_webhook_url.as_deref().unwrap_or_default())
                                             class="w-56 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-400" />
+                                    </label>
+                                    <label class="flex h-8 items-center gap-2 text-xs text-zinc-300">
+                                        <input type="checkbox" name="is_public" value="on" checked=(tenant.is_public == Some(true))
+                                            class="h-4 w-4 accent-emerald-500" />
+                                        "List in public directory"
+                                    </label>
+                                    <label class="flex flex-col gap-1 text-xs text-zinc-400">
+                                        "Tagline (shown on directory card)"
+                                        <input name="tagline" value=(tenant.description.as_deref().unwrap_or_default())
+                                            class="w-64 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-400" />
                                     </label>
                                     <button
                                         class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-sky-400"
@@ -430,8 +450,9 @@ pub async fn tenants_save(Form(form): Form<SaveTenantForm>, cx: &Cx) -> Result<S
         return Ok(see_other("/"));
     }
     let quota = form.storage_quota_gib.saturating_mul(1 << 30);
+    let tenant_id = optional_i64(form.tenant_id);
     auth.save_tenant(
-        optional_i64(form.tenant_id),
+        tenant_id,
         form.tenant_name.clone(),
         quota,
         form.apps_enabled.clone(),
@@ -439,6 +460,30 @@ pub async fn tenants_save(Form(form): Form<SaveTenantForm>, cx: &Cx) -> Result<S
         form.auth_webhook_url.clone(),
     )
     .await?;
+    if let Some(tenant_id) = tenant_id {
+        auth.set_tenant_visibility(tenant_id, form.is_public.is_some(), form.tagline.clone())
+            .await?;
+    }
+    Ok(see_other("/admin"))
+}
+
+/// `POST /admin/tenant/visibility`: a tenant admin (or the owner) toggles
+/// their own tenant's entry in the public directory + its tagline.
+#[route(POST "/admin/tenant/visibility")]
+pub async fn tenant_visibility(Form(form): Form<SaveTenantForm>, cx: &Cx) -> Result<SeeOther> {
+    let auth = platform_core::auth(cx);
+    let current = staff(cx, &auth).await?;
+    // Only the tenant that admin belongs to may be touched.
+    let tenant_id = match (current.user.role(), current.user.tenant_id) {
+        (Role::Owner, _) => optional_i64(form.tenant_id),
+        (_, Some(tid)) => Some(tid),
+        (_, None) => None,
+    };
+    let Some(tenant_id) = tenant_id else {
+        return Ok(see_other("/admin"));
+    };
+    auth.set_tenant_visibility(tenant_id, form.is_public.is_some(), form.tagline.clone())
+        .await?;
     Ok(see_other("/admin"))
 }
 
@@ -522,6 +567,10 @@ fn role_badge_class(role: Role) -> &'static str {
 
 fn status_class(active: bool) -> &'static str {
     if active { "text-emerald-400" } else { "text-red-400" }
+}
+
+fn public_class(is_public: Option<bool>) -> &'static str {
+    if is_public == Some(true) { "text-emerald-400" } else { "text-zinc-500" }
 }
 
 fn quota_text(bytes: Option<i64>) -> String {

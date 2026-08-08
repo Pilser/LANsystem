@@ -11,7 +11,8 @@ use topcoat::{
     Result,
     context::Cx,
     router::content::multipart::Multipart,
-    router::error::{redirect, RouterErrorExt, SeeOther, see_other},
+    router::content::Form,
+    router::error::{RouterErrorExt, SeeOther, redirect, see_other},
     router::{parse_query_params, path_param, route, page},
     view::view,
 };
@@ -26,6 +27,9 @@ const UPLOAD_ERRORS: &[(&str, &str)] = &[
     ("quota", "This upload would exceed the tenant's storage quota."),
     ("file", "No file was attached, or the file was empty."),
 ];
+
+/// A `tenantId` of 0 means "platform-level" (the owner has no tenant).
+const NO_TENANT: i64 = 0;
 
 #[derive(Deserialize)]
 struct UploadQuery {
@@ -56,11 +60,11 @@ async fn media_home(cx: &Cx) -> Result {
 
     let (library, count): (models::MediaLibrary, models::MediaLibraryCount) =
         match current.user.tenant_id {
-            Some(tenant_id) => (
+            Some(tenant_id) if tenant_id != NO_TENANT => (
                 db.query(models::list_library_by_tenant(tenant_id)?).await?,
                 db.query(models::count_library_by_tenant(tenant_id)?).await?,
             ),
-            None => (
+            _ => (
                 db.query(models::list_library()?).await?,
                 db.query(models::count_library()?).await?,
             ),
@@ -100,6 +104,125 @@ async fn media_home(cx: &Cx) -> Result {
 }
 
 /// The `/media-library/upload` page: title + file, posted as multipart.
+/// The public tenant feed (the LAN landing page): no login required. Renders
+/// only the tenants that opted in — no content previews, no headers.
+#[page("/public")]
+async fn public_directory(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let tenants = auth.public_tenants().await?;
+
+    view! {
+        if tenants.is_empty() {
+            <p class="py-10 text-sm text-zinc-400">
+                "Nothing listed yet — tenant admins open their tenant from the Console."
+            </p>
+        } else {
+            <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                for tenant in &tenants {
+                    <li>
+                        <a
+                            class="block rounded-xl border border-zinc-800 bg-zinc-900 transition hover:-translate-y-0.5 hover:border-emerald-500"
+                            href=("/tenant/".to_owned() + tenant.tenant_id.map(|id| id.to_string()).as_deref().unwrap_or("0"))
+                        >
+                            <span
+                                class="rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-xs font-semibold text-emerald-300"
+                            >
+                                "Open service"
+                            </span>
+                            <div class="mt-3 text-lg font-semibold text-zinc-100">
+                                (tenant.tenant_name.as_deref().unwrap_or("—"))
+                            </div>
+                            <p class="mt-1 text-sm text-zinc-400">
+                                (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))
+                            </p>
+                        </a>
+                    </li>
+                }
+            </ul>
+        }
+    }
+}
+
+/// A tenant's public space: their services, viewable by guests. The only
+/// entry points are the landing feed (back button) and the Console.
+#[page("/tenant/{id}")]
+async fn tenant_space(cx: &Cx) -> Result {
+    let raw_id: &str = path_param::<Id>(cx);
+    let Ok(tenant_id) = raw_id.parse::<i64>() else {
+        return Err(redirect("/public").into());
+    };
+
+    let auth = platform_core::auth(cx);
+    let db = platform_core::db(cx);
+    let storage = platform_core::storage(cx);
+
+    let tenant = auth.tenant_by_id(tenant_id).await?.ok_or_redirect("/public")?;
+    if !tenant.is_public.unwrap_or(false) {
+        return Err(redirect("/public").into());
+    }
+
+    let library: models::MediaLibrary = db.query(models::public_items_by_tenant(tenant_id)?).await?;
+
+    view! {
+        <a
+            class="mb-6 inline-block text-sm text-sky-400 hover:text-sky-300"
+            href="/public"
+        >
+            "← Back to the feed"
+        </a>
+        <h1 class="mb-1 text-3xl font-bold">
+            (tenant.tenant_name.as_deref().unwrap_or("—"))
+        </h1>
+        <p class="mb-6 text-sm text-zinc-400">
+            (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))
+        </p>
+        if library.items.is_empty() {
+            <p class="py-10 text-sm text-zinc-400">
+                "Nothing open to guests yet."
+            </p>
+        } else {
+            <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                for item in &library.items {
+                    <li class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+                        match item.stream_key.as_deref() {
+                            Some(key) => {
+                                let url = storage.presign_get(key, 900).await.ok();
+                                match url {
+                                    Some(src) => {
+                                        <video
+                                            class="aspect-video w-full bg-black object-cover"
+                                            src=(src)
+                                            controls=""
+                                        ></video>
+                                    },
+                                    None => { <div class="aspect-video w-full bg-zinc-800" /> },
+                                }
+                            },
+                            None => { <div class="aspect-video w-full bg-zinc-800" /> },
+                        }
+                        <div class="p-4">
+                            <div class="text-base font-semibold text-zinc-100">
+                                (item.title.clone().unwrap_or_default())
+                            </div>
+                            <p class="mt-1 text-xs text-zinc-500">
+                                (duration_text(item.duration_sec))
+                            </p>
+                        </div>
+                    </li>
+                }
+            </ul>
+        }
+    }
+}
+
+/// Render a duration in seconds as a readable label.
+fn duration_text(secs: Option<i64>) -> String {
+    match secs {
+        Some(s) if s > 0 => format!("{}m {}s", s / 60, s % 60),
+        _ => "—".to_string(),
+    }
+}
+
 #[page("/media-library/upload")]
 async fn media_upload_page(cx: &Cx) -> Result {
     let auth = platform_core::auth(cx);
@@ -238,6 +361,7 @@ async fn media_detail(cx: &Cx) -> Result {
     // platform items (no tenant) are owner-only.
     let allowed = match (current.user.tenant_id, item.and_then(|it| it.tenant_id)) {
         (None, _) => true,
+        (Some(user_tenant), _) if user_tenant == NO_TENANT => true,
         (Some(user_tenant), Some(item_tenant)) => user_tenant == item_tenant,
         (Some(_), None) => false,
     };
@@ -250,7 +374,19 @@ async fn media_detail(cx: &Cx) -> Result {
         None => None,
     };
 
-view! {
+    // The platform owner or the owning tenant's admin may publish/unpublish
+    // this item to the public surface.
+    let can_manage = match (current.user.role(), item.and_then(|it| it.tenant_id)) {
+        (platform_core::Role::Owner, _) => true,
+        (role, Some(item_tenant)) => {
+            role.is_at_least(platform_core::Role::TenantAdmin)
+                && current.user.tenant_id == Some(item_tenant)
+        }
+        (_, None) => false,
+    };
+    let item_is_public = item.and_then(|it| it.is_public) == Some(true);
+
+    view! {
         <a class="mb-4 inline-block text-sm text-sky-400 hover:text-sky-300" href="/media-library">
             "← Back to library"
         </a>
@@ -258,10 +394,71 @@ view! {
             Some(item) => {
                 <h1 class="text-3xl font-bold">"Now playing"</h1>
                 components::player(item: item, stream_url: stream_url.as_deref())
+                if can_manage {
+                    <form
+                        class="mt-6 flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3"
+                        method="post"
+                        action=("/media-library/".to_owned() + raw_id + "/visibility")
+                    >
+                        <label class="flex items-center gap-2 text-sm text-zinc-300">
+                            <input
+                                type="checkbox"
+                                name="is_public"
+                                value="on"
+                                checked=(item_is_public)
+                                class="h-4 w-4 accent-emerald-500"
+                            />
+                            "Show on the public directory"
+                        </label>
+                        <button
+                            class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-emerald-500"
+                            type="submit"
+                        >
+                            "Publish settings"
+                        </button>
+                    </form>
+                }
             },
             None => <p class="py-10 text-sm text-zinc-400">"Item not found"</p>,
         }
     }
+}
+
+#[derive(Deserialize)]
+struct VisibilityForm {
+    #[serde(default)]
+    is_public: Option<String>,
+}
+
+/// `POST /media-library/{id}/visibility`: flip an item's public flag.
+#[route(POST "/media-library/{id}/visibility")]
+async fn item_visibility(Form(form): Form<VisibilityForm>, cx: &Cx) -> Result<SeeOther> {
+    let raw_id: &str = path_param::<Id>(cx);
+    let auth = platform_core::auth(cx);
+    let current = auth.current_user(cx).await?.ok_or_redirect("/login")?;
+    let db = platform_core::db(cx);
+
+    let detail: models::MediaDetail =
+        db.query(models::media_item_by_id(raw_id.to_owned())?).await?;
+    let item = detail.item.first();
+
+    let allowed = match (current.user.role(), item.and_then(|it| it.tenant_id)) {
+        (platform_core::Role::Owner, _) => true,
+        (role, Some(item_tenant)) => {
+            role.is_at_least(platform_core::Role::TenantAdmin)
+                && current.user.tenant_id == Some(item_tenant)
+        }
+        (_, None) => false,
+    };
+    if !allowed {
+        return Ok(see_other(&format!("/media-library/{raw_id}")));
+    }
+
+    // Unchecked checkboxes aren't submitted — absence means "private".
+    let is_public = form.is_public.is_some();
+    let _: serde_json::Value =
+        db.query(models::set_item_public(raw_id.to_owned(), is_public)?).await?;
+    Ok(see_other(&format!("/media-library/{raw_id}")))
 }
 
 /// A collision-resistant id for a freshly uploaded item.
