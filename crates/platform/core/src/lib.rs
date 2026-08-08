@@ -1,10 +1,12 @@
-//! Topcoat glue: builds the shared `Db` + `Storage` backends and registers
-//! them once on the router as app context, so business-app crates pull them out
-//! of `&Cx` via [`db`], [`storage`], and [`services`].
+//! Topcoat glue: builds the shared `Db` + `Storage` backends and the
+//! identity service (`Auth`), registering them once on the router as app
+//! context, so business-app crates pull them out of `&Cx` via [`db`],
+//! [`storage`], [`auth`], and [`services`].
 
 mod bootstrap;
 pub mod error;
 mod services;
 
 pub use error::{Error, Result};
-pub use services::{db, services, storage, Services};
+pub use platform_auth::Auth;
+pub use services::{auth, db, services, storage, Services};

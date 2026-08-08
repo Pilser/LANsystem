@@ -8,6 +8,8 @@ pub enum Error {
     Db(#[from] db::Error),
     #[error("storage: {0}")]
     Storage(#[from] storage::Error),
+    #[error("service: {0}")]
+    Service(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

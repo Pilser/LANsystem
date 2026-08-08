@@ -1,0 +1,25 @@
+[package]
+name = "platform-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Users, roles, tenants and sessions for the platform control plane"
+
+[lib]
+name = "platform_auth"
+path = "src/lib.rs"
+
+[dependencies]
+topcoat = { workspace = true, features = ["session"] }
+app-contract = { path = "../../business-apps/app-contract" }
+db = { path = "../../db" }
+helix-db = { workspace = true }
+argon2 = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

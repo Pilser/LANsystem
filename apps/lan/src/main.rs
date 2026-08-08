@@ -1,9 +1,14 @@
+use std::time::Duration;
+
 use app_contract::AppRegistry;
+use platform_auth::Role;
 use topcoat::{
     Result,
-    context::{Cx, app_context},
+    context::{app_context, Cx},
+    cookie::RouterBuilderCookieExt,
     htmx::hx_request,
     router::{Router, RouterBuilderDiscoverExt, layout, page},
+    session::RouterBuilderSessionExt,
     view::view,
 };
 
@@ -16,7 +21,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lan=info,platform_core=info,db=info,storage=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "lan=info,platform_core=info,platform_auth=info,db=info,storage=info,tower_http=info".into()),
         )
         .init();
 
@@ -31,16 +36,26 @@ async fn main() -> Result<()> {
             return Err(error.into());
         }
     };
-    tracing::info!("connected: db + storage ready");
+    tracing::info!("connected: db + storage + auth ready");
+
+    let auth = platform_core::Auth::new(services.db.clone());
 
     let mut registry = AppRegistry::new();
     registry.push(media_app::Media);
+    registry.push(admin_app::Console);
 
     topcoat::start(
         Router::builder()
             .discover()
             .app_context(services)
+            .app_context(auth)
             .app_context(registry)
+            .cookies()
+            .sessions(
+                topcoat::session::SessionConfig::builder()
+                    .lifetime(Duration::from_secs(7 * 24 * 60 * 60))
+                    .build(),
+            )
             .build(),
     )
     .await?;
@@ -56,6 +71,8 @@ async fn root(cx: &Cx, slot: Result) -> Result {
     if hx_request(cx) {
         return slot;
     }
+
+    let current = platform_core::auth(cx).current_user(cx).await?;
 
     view! {
         <!DOCTYPE html>
@@ -81,7 +98,37 @@ async fn root(cx: &Cx, slot: Result) -> Result {
                         <nav class="flex gap-4 text-sm text-zinc-400">
                             <a class="hover:text-zinc-100" href="/">"Launcher"</a>
                             <a class="hover:text-zinc-100" href="/media-library">"Media Library"</a>
+                            match &current {
+                                Some(user) if user.user.role().is_at_least(Role::TenantAdmin) => {
+                                    <a class="hover:text-zinc-100" href="/admin">"Console"</a>
+                                },
+                                _ => {},
+                            }
                         </nav>
+                        <div class="ml-auto flex items-center gap-3 text-sm">
+                            match &current {
+                                Some(user) => {
+                                    <span class="hidden text-zinc-400 sm:inline">
+                                        (user.user.display_name.as_deref().unwrap_or("user"))
+                                    </span>
+                                    <form method="post" action="/logout">
+                                        <button
+                                            class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-sm text-zinc-300 transition hover:border-red-400 hover:text-red-300"
+                                        >
+                                            "Sign out"
+                                        </button>
+                                    </form>
+                                },
+                                None => {
+                                    <a
+                                        class="rounded-md border border-sky-700 bg-sky-900/40 px-3 py-1 text-sky-200 transition hover:bg-sky-800/40"
+                                        href="/login"
+                                    >
+                                        "Sign in"
+                                    </a>
+                                },
+                            }
+                        </div>
                     </header>
                     <main id="main-content">(slot?)</main>
                     <footer

@@ -1,4 +1,5 @@
 use db::Db;
+use platform_auth::Auth;
 use storage::Storage;
 use topcoat::context::{app_context, Cx};
 
@@ -8,6 +9,7 @@ use topcoat::context::{app_context, Cx};
 pub struct Services {
     pub db: Db,
     pub storage: Storage,
+    pub auth: Auth,
 }
 
 impl Services {
@@ -30,4 +32,9 @@ pub fn db(cx: &Cx) -> &Db {
 /// Convenience accessor for the shared storage client.
 pub fn storage(cx: &Cx) -> &Storage {
     &services(cx).storage
+}
+
+/// Convenience accessor for the identity service.
+pub fn auth(cx: &Cx) -> &Auth {
+    &services(cx).auth
 }

@@ -2,6 +2,8 @@
 
 pub mod labels {
     pub const USER: &str = "User";
+    pub const TENANT: &str = "Tenant";
+    pub const SESSION: &str = "Session";
     pub const MEDIA_ITEM: &str = "MediaItem";
     pub const ALBUM: &str = "Album";
     pub const LISTING: &str = "Listing";
@@ -12,6 +14,8 @@ pub mod labels {
 
 pub mod edges {
     pub const FOLLOWS: &str = "FOLLOWS";
+    pub const MANAGES: &str = "MANAGES";
+    pub const MEMBER_OF: &str = "MEMBER_OF";
     pub const BELONGS_TO: &str = "BELONGS_TO";
     pub const RELEASED: &str = "RELEASED";
     pub const SENT_TO: &str = "SENT_TO";
@@ -24,10 +28,21 @@ pub mod props {
     pub const USER_ID: &str = "userId";
     pub const USERNAME: &str = "username";
     pub const EMAIL: &str = "email";
+    pub const PASSWORD_HASH: &str = "passwordHash";
+    pub const ROLE: &str = "role";
     pub const AVATAR_KEY: &str = "avatarKey";
     pub const CREATED_AT: &str = "createdAt";
     pub const UPDATED_AT: &str = "updatedAt";
     pub const DELETED_AT: &str = "deletedAt";
+    pub const TENANT_ID: &str = "tenantId";
+    pub const TENANT_NAME: &str = "tenantName";
+    pub const APPS_ENABLED: &str = "appsEnabled";
+    pub const STORAGE_QUOTA_BYTES: &str = "storageQuotaBytes";
+    pub const STORAGE_USED_BYTES: &str = "storageUsedBytes";
+    pub const BILLING_ENABLED: &str = "billingEnabled";
+    pub const AUTH_WEBHOOK_URL: &str = "authWebhookUrl";
+    pub const SESSION_ID: &str = "sessionId";
+    pub const EXPIRES_AT: &str = "expiresAt";
     pub const NAME: &str = "name";
     pub const DISPLAY_NAME: &str = "displayName";
     pub const TITLE: &str = "title";
@@ -51,6 +66,8 @@ pub mod props {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeLabel {
     User,
+    Tenant,
+    Session,
     MediaItem,
     Album,
     Listing,
@@ -65,6 +82,8 @@ impl NodeLabel {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::User => labels::USER,
+            Self::Tenant => labels::TENANT,
+            Self::Session => labels::SESSION,
             Self::MediaItem => labels::MEDIA_ITEM,
             Self::Album => labels::ALBUM,
             Self::Listing => labels::LISTING,
@@ -80,6 +99,8 @@ impl From<&str> for NodeLabel {
     fn from(value: &str) -> Self {
         match value {
             labels::USER => Self::User,
+            labels::TENANT => Self::Tenant,
+            labels::SESSION => Self::Session,
             labels::MEDIA_ITEM => Self::MediaItem,
             labels::ALBUM => Self::Album,
             labels::LISTING => Self::Listing,
@@ -94,6 +115,8 @@ impl From<&str> for NodeLabel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeLabel {
     Follows,
+    Manages,
+    MemberOf,
     BelongsTo,
     Released,
     SentTo,
@@ -108,6 +131,8 @@ impl EdgeLabel {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Follows => edges::FOLLOWS,
+            Self::Manages => edges::MANAGES,
+            Self::MemberOf => edges::MEMBER_OF,
             Self::BelongsTo => edges::BELONGS_TO,
             Self::Released => edges::RELEASED,
             Self::SentTo => edges::SENT_TO,
@@ -123,6 +148,8 @@ impl From<&str> for EdgeLabel {
     fn from(value: &str) -> Self {
         match value {
             edges::FOLLOWS => Self::Follows,
+            edges::MANAGES => Self::Manages,
+            edges::MEMBER_OF => Self::MemberOf,
             edges::BELONGS_TO => Self::BelongsTo,
             edges::RELEASED => Self::Released,
             edges::SENT_TO => Self::SentTo,
@@ -139,10 +166,21 @@ pub enum Property {
     UserId,
     Username,
     Email,
+    PasswordHash,
+    Role,
     AvatarKey,
     CreatedAt,
     UpdatedAt,
     DeletedAt,
+    TenantId,
+    TenantName,
+    AppsEnabled,
+    StorageQuotaBytes,
+    StorageUsedBytes,
+    BillingEnabled,
+    AuthWebhookUrl,
+    SessionId,
+    ExpiresAt,
     Name,
     DisplayName,
     Title,
@@ -171,10 +209,21 @@ impl Property {
             Self::UserId => props::USER_ID,
             Self::Username => props::USERNAME,
             Self::Email => props::EMAIL,
+            Self::PasswordHash => props::PASSWORD_HASH,
+            Self::Role => props::ROLE,
             Self::AvatarKey => props::AVATAR_KEY,
             Self::CreatedAt => props::CREATED_AT,
             Self::UpdatedAt => props::UPDATED_AT,
             Self::DeletedAt => props::DELETED_AT,
+            Self::TenantId => props::TENANT_ID,
+            Self::TenantName => props::TENANT_NAME,
+            Self::AppsEnabled => props::APPS_ENABLED,
+            Self::StorageQuotaBytes => props::STORAGE_QUOTA_BYTES,
+            Self::StorageUsedBytes => props::STORAGE_USED_BYTES,
+            Self::BillingEnabled => props::BILLING_ENABLED,
+            Self::AuthWebhookUrl => props::AUTH_WEBHOOK_URL,
+            Self::SessionId => props::SESSION_ID,
+            Self::ExpiresAt => props::EXPIRES_AT,
             Self::Name => props::NAME,
             Self::DisplayName => props::DISPLAY_NAME,
             Self::Title => props::TITLE,
@@ -204,10 +253,21 @@ impl From<&str> for Property {
             props::USER_ID => Self::UserId,
             props::USERNAME => Self::Username,
             props::EMAIL => Self::Email,
+            props::PASSWORD_HASH => Self::PasswordHash,
+            props::ROLE => Self::Role,
             props::AVATAR_KEY => Self::AvatarKey,
             props::CREATED_AT => Self::CreatedAt,
             props::UPDATED_AT => Self::UpdatedAt,
             props::DELETED_AT => Self::DeletedAt,
+            props::TENANT_ID => Self::TenantId,
+            props::TENANT_NAME => Self::TenantName,
+            props::APPS_ENABLED => Self::AppsEnabled,
+            props::STORAGE_QUOTA_BYTES => Self::StorageQuotaBytes,
+            props::STORAGE_USED_BYTES => Self::StorageUsedBytes,
+            props::BILLING_ENABLED => Self::BillingEnabled,
+            props::AUTH_WEBHOOK_URL => Self::AuthWebhookUrl,
+            props::SESSION_ID => Self::SessionId,
+            props::EXPIRES_AT => Self::ExpiresAt,
             props::NAME => Self::Name,
             props::DISPLAY_NAME => Self::DisplayName,
             props::TITLE => Self::Title,

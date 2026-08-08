@@ -22,6 +22,9 @@ pub struct MediaItem {
     pub release_year: Option<i64>,
     pub duration_sec: Option<i64>,
     pub stream_key: Option<String>,
+    /// The tenant that owns this item; `None`/absent = platform item only
+    /// visible to the platform owner.
+    pub tenant_id: Option<i64>,
 }
 
 /// Response shape of [`list_library`].
@@ -63,6 +66,29 @@ pub fn list_library() -> db::ReadBatch {
                     PropertyProjection::new(props::RELEASE_YEAR),
                     PropertyProjection::new(props::DURATION_SEC),
                     PropertyProjection::new(props::STREAM_KEY),
+                    PropertyProjection::new(props::TENANT_ID),
+                ]),
+        )
+        .returning(["items"])
+}
+
+/// One tenant's library: items whose `tenantId` matches, newest first.
+#[query]
+pub fn list_library_by_tenant(tenant_id: i64) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "items",
+            g().n_with_label(labels::MEDIA_ITEM)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .order_by(props::RELEASE_YEAR, Order::Desc)
+                .limit(100usize)
+                .project(vec![
+                    PropertyProjection::new(props::MEDIA_ITEM_ID),
+                    PropertyProjection::new(props::TITLE),
+                    PropertyProjection::new(props::RELEASE_YEAR),
+                    PropertyProjection::new(props::DURATION_SEC),
+                    PropertyProjection::new(props::STREAM_KEY),
+                    PropertyProjection::new(props::TENANT_ID),
                 ]),
         )
         .returning(["items"])
@@ -76,6 +102,19 @@ pub fn count_library() -> db::ReadBatch {
             "total",
             g().n_with_label(labels::MEDIA_ITEM)
                 .where_(not_deleted())
+                .count(),
+        )
+        .returning(["total"])
+}
+
+/// Number of titles in one tenant's library.
+#[query]
+pub fn count_library_by_tenant(tenant_id: i64) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "total",
+            g().n_with_label(labels::MEDIA_ITEM)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
                 .count(),
         )
         .returning(["total"])
@@ -120,6 +159,7 @@ pub fn media_item_by_id(media_item_id: String) -> db::ReadBatch {
                     PropertyProjection::new(props::RELEASE_YEAR),
                     PropertyProjection::new(props::DURATION_SEC),
                     PropertyProjection::new(props::STREAM_KEY),
+                    PropertyProjection::new(props::TENANT_ID),
                 ]),
         )
         .returning(["item"])

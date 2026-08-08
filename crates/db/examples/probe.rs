@@ -20,15 +20,25 @@ async fn main() -> Result<(), Error> {
         )
         .returning(["items"]);
     let request = QueryRequest::read(q);
-
-    #[derive(serde::Deserialize)]
-    struct Items {
-        items: serde_json::Value,
-    }
+    println!("--- REQUEST ---\n{}", request.to_json_string()?);
 
     let config = db::DbConfig::from_env()?;
-    let client = db::Db::connect(&config)?;
-    let response: Items = client.query(request).await?;
-    println!("{}", serde_json::to_string_pretty(&response.items).unwrap());
+    let url = format!("{}/{}", config.endpoint, config.query_path);
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(request.to_json_bytes()?)
+        .send()
+        .await
+        .map_err(|e| db::Error::from(e))?;
+    let status = response.status();
+    println!("--- HEADERS ---");
+    for (k, v) in response.headers() {
+        println!("{k}: {v:?}");
+    }
+    let bytes = response.bytes().await.map_err(|e| db::Error::from(e))?;
+    println!("--- RESPONSE ({status}) ---");
+    println!("{}", String::from_utf8_lossy(&bytes[..bytes.len().min(600)]));
     Ok(())
 }

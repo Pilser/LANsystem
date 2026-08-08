@@ -14,14 +14,14 @@ impl DbConfig {
     /// Load config from `HELIX_ENDPOINT` / `HELIX_QUERY_PATH` / `HELIX_API_KEY` env vars.
     ///
     /// `HELIX_ENDPOINT` defaults to `http://localhost:6969` when unset.
-    /// `HELIX_QUERY_PATH` lets a deployment redirect the query route (e.g.
-    /// `v1/query` for the enterprise-dev image, `v2/query` for the standalone
-    /// image or Helix Cloud).
+    /// `HELIX_QUERY_PATH` lets a deployment redirect the query route; the
+    /// standalone image and Helix Cloud serve the v2 contract at `/v2/query`
+    /// (the legacy `v1/query` is served by the old enterprise-dev image).
     pub fn from_env() -> Result<Self> {
         let endpoint = std::env::var("HELIX_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:6969".to_string());
         let query_path =
-            std::env::var("HELIX_QUERY_PATH").unwrap_or_else(|_| "v1/query".to_string());
+            std::env::var("HELIX_QUERY_PATH").unwrap_or_else(|_| "v2/query".to_string());
         let api_key = std::env::var("HELIX_API_KEY").ok();
         Ok(Self {
             endpoint,
@@ -101,6 +101,17 @@ impl Db {
             return Err(crate::Error::server(status, &bytes));
         }
 
-        serde_json::from_slice(&bytes).map_err(crate::Error::from)
+        match serde_json::from_slice::<R>(&bytes) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                tracing::error!(
+                    url = %url,
+                    error = %error,
+                    body = %String::from_utf8_lossy(&bytes[..bytes.len().min(512)]),
+                    "db: response deserialization failed",
+                );
+                Err(crate::Error::from(error))
+            }
+        }
     }
 }

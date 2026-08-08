@@ -1,7 +1,7 @@
 # LANsystem — Architecture & Workspace Plan
 
 > Foundational doc. Status: **decided**. Apps are compile-time feature plugins
-> (Option A below).
+> (Option A below); tenancy + the control plane are decided in §4.
 
 ## 1. Vision
 
@@ -13,6 +13,10 @@ apps off one server process and one database:
 - **News**
 - **Messaging** between users
 - *(expandable)* ordering, delivery, and other domain apps
+
+Each app is a **domain**: one server and one database, yet shared by many **tenants**
+(businesses) that each run their own users with isolated data — all governed by the
+owner through a built-in **Control console** (see §4).
 
 Principle: **one feature = one crate**, files inside each crate stay small and
 single-purpose, so the system stays manageable no matter how many apps are added.
@@ -27,6 +31,7 @@ single-purpose, so the system stays manageable no matter how many apps are added
 | DB | `helixdb` | graph/vector store; local instance via `helix-db` SDK |
 | Object store | `rustfs` | S3-compatible, Apache-2.0; serves media/binary blobs |
 | Storage client | `aws-sdk-s3` | official AWS SDK, documented RustFS client; presigned URLs |
+| Auth | `topcoat-session` + argon2 | local-first accounts/sessions in HelixDB; OIDC later behind one `platform/auth` trait |
 
 Notes:
 - Topcoat is v0.x and explicitly experimental — expect breaking changes. Acceptable for a
@@ -54,8 +59,9 @@ LANsystem/
 │   │   ├── auth/                    #   login/session (cross-cutting)
 │   │   └── messaging/               #   chat (cross-cutting comm layer)
 │   ├── ui/                          # shared Tailwind components
-│   └── business-apps/               # ★ plugins (the open decision — see §5)
+│   └── business-apps/               # ★ domain apps (see §6) + §4 console
 │       ├── app-contract/            #   the "BusinessApp" plugin trait + registry
+│       ├── admin/                   #   ★ Control console: apps, tenants, users
 │       ├── media/                   #   media server: films, songs, downloads
 │       ├── marketplace/             #   virtual marketplace
 │       ├── news/                    #   news feed
@@ -69,7 +75,76 @@ LANsystem/
 Cargo supports nested workspace members, so `crates/business-apps/*` are independent
 crates that can be enabled/disabled individually via features.
 
-## 4. Layered dependency rules (keep it manageable)
+## 4. Tenancy & control plane (decided)
+
+The system is multi-user and multi-tenant. Each app is a **domain** shared by
+**tenants** (businesses), and each tenant runs its **own users**:
+
+```text
+owner — the platform admin (you)
+├── media-library domain (one server, one database)
+│    ├── tenant "Rashid's Cinema"     → tenant_admin + members/clients
+│    └── tenant "Alfur Studios"       → suspended business, its data isolated
+└── delivery domain (future app)
+     └── tenant "…"
+```
+
+### Roles
+
+| Role | Scope | Power |
+|---|---|---|
+| `owner` | platform | enable/disable an app for a tenant, create/suspend tenants, set storage quotas |
+| `tenant_admin` | one tenant | manage that tenant's users (activate/deactivate, roles) and its content |
+| `member` | one tenant | uses the tenant's services |
+
+App-level control passes down the tree exactly like the parent admin console:
+platform `owner` governs every tenant on every domain app, and each `tenant_admin`
+governs the members of their own tenant — including toggling the tenant's billing
+hook, so a business decides "my media library calls my billing endpoint".
+
+### Decisions
+
+- **Auth is local-first**: argon2 password hashes + sessions in HelixDB (`topcoat-session`),
+  behind one `platform/auth` trait so OIDC can be plugged in later. The first account is
+  a seeded `owner` (from env).
+- **Enablement is data, not build config.** Apps stay compile-time crates (§6), but the
+  per-tenant on/off list, quotas, and status live on the `Tenant` node
+  (`appsEnabled`, `storageQuotaBytes`, `storageUsedBytes`, `status`).
+- **The Control console is a normal business app** — `crates/business-apps/admin`,
+  display name "Control". Owner view: all apps + tenants, disable an app, suspend a
+  tenant, set quotas. Tenant-admin view: that tenant's users and roles.
+- **Isolation is query-level.** Every tenant-owned node carries `tenantId`; every domain
+  query filters it first (§11). One server, one database, hard per-tenant scoping.
+- **Billing is a plug-in, never core (the MikroTik pattern).** The engine is mechanism;
+  policy (subscriptions, pay-per-view) lives **outside** it. Core defines an
+  `Authorizer` seam — `authorize(user, tenant, app, resource) -> allowed?` — and ships
+  two providers: `Allow` (local policy only) and a `Webhook` provider that calls an
+  external billing/AAA endpoint (MikroTik's RADIUS). A tenant enabling `billingEnabled`
+  sets its own `authWebhookUrl`; the external system decides allow/deny + limits
+  (e.g. bitrate), so Stripe/crypto/whatever attaches *next to* the server, never *in*
+  it.
+- **Session control is exposed like RouterOS API**: the platform can force-drop a
+  user's sessions (and short-lived presigns) mid-watch — a subscription expiry stops
+  the stream instantly with no new code in the app.
+- **Phase 5 (later):** host → tenant mapping, so a tenant can get its own subdomain.
+
+### Enforcement order (in `platform/core`)
+
+session → user active? → tenant active? → app enabled for tenant? → role? →
+authorizer (webhook or allow) → quota (on writes). Applied by router middleware and
+reusable by domain queries; the launcher grid renders only the apps the caller's
+tenant has enabled. Every check is a function on the auth seam, so a business app
+never sees a payment library.
+
+### Build order (phases)
+
+1. **Identity** — sessions/roles schema, seed `owner`; `User` gains `role`/`status`.
+2. **Tenants + policy** — `Tenant` node, per-tenant enable, suspend blocks everything.
+3. **Control console UI (owner + tenant views)** — ships with phases 1–3 (decided).
+4. **Media Library tenant-scoped** — `tenantId` on `MediaItem`, quota checks at upload.
+5. **To-many domains** — host header → tenant.
+
+## 5. Layered dependency rules (keep it manageable)
 
 1. **Infrastructure crates (`db`, `storage`)** depend on nothing local. Any code – or a
    future tool outside this repo – can consume them directly.
@@ -85,7 +160,7 @@ crates that can be enabled/disabled individually via features.
 6. Everything that should be discoverable (`#[page]`, `#[shard]`, `#[procedure]`, fonts,
    assets) is registered via Topcoat link-time `discover()` — nothing is wired by hand.
 
-## 5. Decision — apps are compile-time feature plugins
+## 6. Decision — apps are compile-time feature plugins
 
 **Chosen: Option A — compile-time plugins.** Each business app is a crate under
 `crates/business-apps/`; it is installed/uninstalled by editing the `[features]` list in
@@ -130,13 +205,14 @@ pub fn installed_apps() -> Vec<InstalledApp>;
 
 Every business app implements `BusinessApp` for an empty marker type in its crate and
 registers its true pages via standard `#[page]`/`#[route]` attributes. The launcher
-captures `installed_apps()` at the top of the `home` page.
+captures `installed_apps()` at the top of the `home` page, filtered by the caller's
+tenant enablement and role (§4).
 
 Each user-visible app therefore becomes a one-`crate` "plugin": add the `features =
 ["media"]` line (or drop a new crate under `business-apps/`) and it appears in the
 launcher with its own nav entry — nothing else changes.
 
-## 6. Standard file layout of one business-app crate
+## 7. Standard file layout (of one business-app crate)
 
 Small, one-concern files:
 
@@ -161,7 +237,7 @@ Adding a feature ←→ adding a crate:
 
 That's the whole "install".
 
-## 7. Bootstrap (apps/lan)
+## 8. Bootstrap (apps/lan)
 
 The binary is pure wiring:
 
@@ -177,25 +253,25 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-## 8. Storage keys
+## 9. Storage keys
 
 `storage` mirrors object keys:
 
 ```text
-media/<user>/<album>/<track>.mp3
-chat/<sender>/<msg_id>.jpg
-news/<year>/<slug>.pdf
+media/<tenantId>/<user>/<album>/<track>.mp3
+chat/<tenantId>/<sender>/<msg_id>.jpg
+news/<tenantId>/<year>/<slug>.pdf
 ```
 object keys binary blobs; everything about the objects themselves lives in the
 graph in HelixDB.
 
-## 9. Licensing edge
+## 10. Licensing edge
 
 - `db` crate wraps: `helix-db` (AGPL) — keep **every other crate** free of it so the
   app-level code keeps the MIT/Apache hygiene.
 - `storage` crate wraps: `aws-sdk-s3` + RustFS (Apache-2.0).
 
-## 10. Shared schema conventions (HelixDB glossary)
+## 11. Shared schema conventions (HelixDB glossary)
 
 HelixDB is a labeled property graph. Every crate writes to the **same one instance**,
 so all crates must agree on labels, edge names, and property names. This glossary is the
@@ -207,6 +283,7 @@ cannot drift by typos. **Always reuse these names; never invent new ones.**
 | Label | Meaning |
 |---|---|
 | `User` | a person on the LAN |
+| `Tenant` | a business on a domain; carries app/quotas/status (§4) |
 | `MediaItem` | a film, song, or downloadable file |
 | `Album` | a group of MediaItem nodes |
 | `Listing` | a marketplace listing |
@@ -219,6 +296,8 @@ cannot drift by typos. **Always reuse these names; never invent new ones.**
 | Edge | From → To | Meaning |
 |---|---|---|
 | `FOLLOWS` | User → User | relationship |
+| `MANAGES` | Tenant → User | tenant admins (edge `role` = "admin") |
+| `MEMBER_OF` | User → Tenant | tenant membership |
 | `BELONGS_TO` | MediaItem/Album → User | ownership |
 | `RELEASED` | Album → MediaItem | album contains media |
 | `SENT_TO` | Message → Message | chat thread (message linking) |
@@ -230,6 +309,13 @@ cannot drift by typos. **Always reuse these names; never invent new ones.**
 
 | Property | Applies to | Convention |
 |---|---|---|
+| `tenantId` | Tenant + all tenant-owned nodes | the tenant scope; domain queries filter on it first |
+| `role` | User | `owner` / `tenant_admin` / `member` |
+| `status` | Tenant, User | `active` / `suspended` (blanket stop) |
+| `appsEnabled` | Tenant | list of app IDs this tenant may use |
+| `billingEnabled` | Tenant | when true, the tenant's `authWebhookUrl` is consulted for access |
+| `authWebhookUrl` | Tenant | external AAA/billing endpoint (MikroTik-style RADIUS) |
+| `storageQuotaBytes` / `storageUsedBytes` | Tenant | quota accounting |
 | `userId` | User | unique ID generated once, used as query anchor |
 | `name`, `displayName` | User/MediaItem | display name/title |
 | `email` | User | unique |
@@ -250,18 +336,19 @@ Otherwise leave edge properties minimal.
 
 ### Key rules
 
-1. Use `userId`/`mediaItemId`-style unique ID keys as primary anchor — never broad label scan.
+1. Use `userId`/`mediaItemId`-style unique IDs as the primary anchor — never broad label scan.
 2. Indexed properties stay at top level (nested `config.metadata.score` cannot be indexed).
-3. Binary bytes never go into Helix; store only object keys; bytes live in RustFS.
-4. One `User node` unique index on `userId`.
+3. Binary bytes never go into Helix; store only object keys; the bytes live in RustFS.
+4. One `User` node unique index on `userId`.
 5. Soft-delete instead of hard delete; filter `deletedAt` = null first.
+6. Every tenant-owned node carries `tenantId`; queries anchor on it before anything else (§4).
 
 ### Where this lives
 
 - `crates/db/src/schema.rs` — the constants (single source of truth).
-- Reference at `docs/ARCHITECTURE.md` §10-§11 and `.agents/skills/helix-query-rust/SKILL.md`.
+- Reference at `docs/ARCHITECTURE.md` §11–§12 and `.agents/skills/helix-query-rust/SKILL.md`.
 
-## 11. DB & storage interaction (query ownership)
+## 12. DB & storage interaction (query ownership)
 
 **Rule: the crate that owns a domain owns its queries.** Feature/app crates define and
 keep their own HelixDB queries and storage access — nothing is centralized in a big

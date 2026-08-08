@@ -4,10 +4,13 @@ members = [
     "crates/db",
     "crates/storage",
     "crates/platform/core",
+    "crates/platform/auth",
     "crates/business-apps/app-contract",
     "crates/business-apps/media",
+    "crates/business-apps/admin",
     "apps/lan",
 ]
+exclude = ["topcoat", "helix-db"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
+argon2 = "0.5"
 
 # --- DB stack ---
 helix-db = { version = "3.0.0", default-features = false }
@@ -34,6 +38,9 @@ bytes = "1"
 
 # --- Full-stack web framework ---
 topcoat = { version = "0.5.0", features = ["websocket", "multipart", "sse", "htmx", "tailwind"] }
+
+[patch.crates-io]
+topcoat = { path = "topcoat/crates/topcoat" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
