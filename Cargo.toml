@@ -8,6 +8,7 @@ members = [
     "crates/business-apps/app-contract",
     "crates/business-apps/media",
     "crates/business-apps/marketplace",
+    "crates/business-apps/agent",
     "crates/business-apps/admin",
     "crates/business-apps/onboarding",
     "apps/lan",

@@ -57,6 +57,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-app"
+version = "0.1.0"
+dependencies = [
+ "app-contract",
+ "db",
+ "marketplace-app",
+ "media-app",
+ "platform-auth",
+ "platform-core",
+ "serde",
+ "serde_json",
+ "topcoat",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1787,6 +1802,7 @@ name = "lan"
 version = "0.1.0"
 dependencies = [
  "admin-app",
+ "agent-app",
  "app-contract",
  "marketplace-app",
  "media-app",

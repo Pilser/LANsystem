@@ -18,6 +18,7 @@ media-app = { path = "../../crates/business-apps/media" }
 marketplace-app = { path = "../../crates/business-apps/marketplace" }
 onboarding-app = { path = "../../crates/business-apps/onboarding" }
 admin-app = { path = "../../crates/business-apps/admin" }
+agent-app = { path = "../../crates/business-apps/agent" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

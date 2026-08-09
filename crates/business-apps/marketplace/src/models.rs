@@ -11,7 +11,7 @@ use db::schema::{labels, props};
 use db::{g, read_batch, write_batch, Expr, Order, Predicate, PropertyInput, PropertyProjection};
 
 /// A single product row as projected by the catalog queries.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Product {
     pub product_id: Option<String>,
@@ -26,21 +26,21 @@ pub struct Product {
 }
 
 /// A page of products.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductPage {
     pub items: Vec<Product>,
 }
 
 /// A catalog count.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductCount {
     pub total: i64,
 }
 
 /// An order ticket waiting for the shop tenant's staff.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderTicket {
     pub order_id: Option<String>,
@@ -54,7 +54,7 @@ pub struct OrderTicket {
 }
 
 /// A page of order tickets.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderPage {
     pub items: Vec<OrderTicket>,

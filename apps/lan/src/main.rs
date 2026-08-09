@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
     registry.push(marketplace_app::Marketplace);
     registry.push(onboarding_app::Onboarding);
     registry.push(admin_app::Console);
+    registry.push(agent_app::Agent);
 
     topcoat::start(
         Router::builder()

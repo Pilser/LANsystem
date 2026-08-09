@@ -14,7 +14,7 @@ use db::{g, read_batch, write_batch, Expr, NodeRef, Order, Predicate, PropertyIn
 ///
 /// Properties follow the shared schema conventions (camelCase on the wire,
 /// e.g. `mediaItemId`, `releaseYear`, `streamKey`).
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaItem {
     pub media_item_id: Option<String>,
@@ -35,19 +35,19 @@ pub struct MediaItem {
 }
 
 /// Response shape of [`list_library`].
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaLibrary {
     pub items: Vec<MediaItem>,
 }
 
 /// Response shape of [`media_item_by_id`].
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaDetail {
     pub item: Vec<MediaItem>,
 }
 
 /// Response shape of [`count_library`].
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaLibraryCount {
     pub total: i64,
 }
@@ -168,7 +168,7 @@ pub fn media_item_by_id(media_item_id: String) -> db::ReadBatch {
 
 /// A tenant's storage accounting, read before an upload so the quota gate can
 /// be enforced at the app layer.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TenantStorage {
     pub storage_quota_bytes: Option<i64>,
@@ -176,7 +176,7 @@ pub struct TenantStorage {
 }
 
 /// Response shape of [`tenant_storage_info`].
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TenantStorageInfo {
     pub tenant: Vec<TenantStorage>,
 }
@@ -311,7 +311,7 @@ pub fn set_item_price(media_item_id: String, price: i64) -> db::WriteBatch {
 
 /// A media purchase ticket: a signed-in user asked for the item. Statuses
 /// mirror the marketplace: `pending` → `accepted`|`cancelled`, then `done`.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaOrder {
     pub order_id: Option<String>,
@@ -324,7 +324,7 @@ pub struct MediaOrder {
 }
 
 /// Response shape of the order queries.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaOrderPage {
     pub items: Vec<MediaOrder>,
 }
@@ -349,6 +349,20 @@ pub fn media_order_by_item_and_user(media_item_id: String, user_id: i64) -> db::
             g().n_with_label(labels::MEDIA_ORDER)
                 .where_(Predicate::eq(props::MEDIA_ITEM_ID, media_item_id))
                 .where_(Predicate::eq(props::USER_ID, user_id))
+                .limit(1usize)
+                .project(project_order()),
+        )
+        .returning(["items"])
+}
+
+/// One media order by id (agent protocol / status lookups).
+#[query]
+pub fn media_order_by_id(order_id: String) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "items",
+            g().n_with_label(labels::MEDIA_ORDER)
+                .where_(Predicate::eq(props::ORDER_ID, order_id))
                 .limit(1usize)
                 .project(project_order()),
         )

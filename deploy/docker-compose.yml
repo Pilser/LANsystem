@@ -43,6 +43,8 @@ services:
       # --- app port ---
       HOST: 0.0.0.0
       PORT: "3000"
+      # --- agent protocol (x-agent-key header, acts as platform owner) ---
+      LAN_AGENT_KEY: ${LAN_AGENT_KEY:-local-dev-agent-key}
 
 networks:
   helix-net:
