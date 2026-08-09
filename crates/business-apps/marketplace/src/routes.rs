@@ -32,7 +32,7 @@ path_param!(order_id);
 const NO_TENANT: i64 = 0;
 
 /// Display currency for prices stored in minor units.
-const CURRENCY: &str = "USD";
+const CURRENCY: &str = "UGX";
 
 #[derive(Deserialize)]
 struct ShopQuery {
@@ -360,8 +360,8 @@ async fn shop_manage(cx: &Cx) -> Result {
                 <input name="description" class="w-64 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
             </label>
             <label class="flex flex-col gap-1 text-sm">
-                "Price ($)"
-                <input name="price_dollars" type="number" step="0.01" min="0" required="" class="w-24 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                "Price (UGX)"
+                <input name="price_ugx" type="number" step="1" min="0" required="" class="w-28 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
             </label>
             <label class="flex flex-col gap-1 text-sm">
                 "Stock"
@@ -453,7 +453,7 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
 
     let mut title = String::new();
     let mut description = String::new();
-    let mut price_dollars = String::new();
+    let mut price_ugx = String::new();
     let mut stock = 0i64;
     let mut file_name: Option<String> = None;
     let mut file_bytes: Option<Bytes> = None;
@@ -462,7 +462,7 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
         match name.as_str() {
             "title" => title = field.text().await?.trim().to_string(),
             "description" => description = field.text().await?.trim().to_string(),
-            "price_dollars" => price_dollars = field.text().await?.trim().to_string(),
+            "price_ugx" => price_ugx = field.text().await?.trim().to_string(),
             "stock" => stock = field.text().await?.trim().parse().unwrap_or(0),
             "photo" => {
                 file_name = field.file_name().map(str::to_owned);
@@ -475,8 +475,8 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
         return Ok(see_other(&format!("/shop-manage/{tenant_id}")));
     }
 
-    // Prices are entered in dollars and stored in minor units (cents).
-    let price = (price_dollars.parse::<f64>().unwrap_or(0.0) * 100.0).round() as i64;
+    // Prices are entered in UGX shillings and stored as-is (minor units).
+    let price = price_ugx.parse::<i64>().unwrap_or(0);
 
     // One id for the whole product: the photo key and the node share it.
     let id = next_product_id();
@@ -542,10 +542,10 @@ struct ProductVisibilityForm {
     is_public: Option<String>,
 }
 
-/// Format cents as a currency string.
+/// Format minor units as a currency string.
 fn price_text(cents: Option<i64>) -> String {
     match cents {
-        Some(c) if c > 0 => format!("${:.2}", c as f64 / 100.0),
+        Some(c) if c > 0 => format!("UGX {c}"),
         _ => "—".to_string(),
     }
 }

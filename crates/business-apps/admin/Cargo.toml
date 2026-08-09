@@ -14,6 +14,8 @@ topcoat = { workspace = true }
 app-contract = { path = "../../business-apps/app-contract" }
 platform-core = { path = "../../platform/core" }
 platform-auth = { path = "../../platform/auth" }
+marketplace-app = { path = "../../business-apps/marketplace" }
+media-app = { path = "../../business-apps/media" }
 serde = { workspace = true }
 
 [lints]

@@ -12,6 +12,7 @@ pub mod labels {
     pub const MESSAGE: &str = "Message";
     pub const PRODUCT: &str = "Product";
     pub const MARKETPLACE_ORDER: &str = "MarketplaceOrder";
+    pub const MEDIA_ORDER: &str = "MediaOrder";
     pub const DOMAIN_POLICY: &str = "Domain";
 }
 
@@ -96,6 +97,7 @@ pub enum NodeLabel {
     Message,
     Product,
     MarketplaceOrder,
+    MediaOrder,
     DomainPolicy,
     /// A label returned by the database that is not part of the shared glossary.
     Unknown,
@@ -115,6 +117,7 @@ impl NodeLabel {
             Self::Message => labels::MESSAGE,
             Self::Product => labels::PRODUCT,
             Self::MarketplaceOrder => labels::MARKETPLACE_ORDER,
+            Self::MediaOrder => labels::MEDIA_ORDER,
             Self::DomainPolicy => labels::DOMAIN_POLICY,
             Self::Unknown => "Unknown",
         }
@@ -135,6 +138,7 @@ impl From<&str> for NodeLabel {
             labels::MESSAGE => Self::Message,
             labels::PRODUCT => Self::Product,
             labels::MARKETPLACE_ORDER => Self::MarketplaceOrder,
+            labels::MEDIA_ORDER => Self::MediaOrder,
             labels::DOMAIN_POLICY => Self::DomainPolicy,
             _ => Self::Unknown,
         }

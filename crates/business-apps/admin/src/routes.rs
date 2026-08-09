@@ -537,6 +537,7 @@ async fn console(cx: &Cx) -> Result {
 async fn portal(cx: &Cx) -> Result {
     let auth = platform_core::auth(cx);
     let current = portal_user(cx, &auth).await?;
+    let db = platform_core::db(cx);
     let tenant_id = current.user.tenant_id.unwrap_or(0);
     let members = auth.users_by_tenant(tenant_id).await?;
     let tenant = auth
@@ -708,13 +709,211 @@ async fn portal(cx: &Cx) -> Result {
                 </div>
             </form>
         </section>
+
+        if tenant.has_app("marketplace") {
+            let products: marketplace_app::models::ProductPage =
+                db.query(marketplace_app::models::products_by_tenant(tenant_id)?).await?;
+            let orders: marketplace_app::models::OrderPage =
+                db.query(marketplace_app::models::orders_by_tenant(tenant_id)?).await?;
+
+            <section class="mb-10">
+                <h2 class="mb-3 text-xl font-semibold">"Shop products"</h2>
+                <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+                    <h3 class="mb-3 text-sm font-medium text-zinc-400">"Add a product"</h3>
+                    <form method="post" enctype="multipart/form-data"
+                        action=("/shop-manage/".to_owned() + &tenant_id.to_string() + "/product")
+                        class="flex flex-wrap items-end gap-4"
+                    >
+                        <label class="flex flex-col gap-1 text-sm">
+                            "Title"
+                            <input name="title" required=""
+                                class="w-48 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                        </label>
+                        <label class="flex flex-col gap-1 text-sm">
+                            "Description"
+                            <input name="description"
+                                class="w-56 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                        </label>
+                        <label class="flex flex-col gap-1 text-sm">
+                            "Price (UGX)"
+                            <input name="price_ugx" type="number" step="1" min="0" required=""
+                                class="w-28 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                        </label>
+                        <label class="flex flex-col gap-1 text-sm">
+                            "Stock"
+                            <input name="stock" type="number" min="0" value="0"
+                                class="w-20 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                        </label>
+                        <label class="flex flex-col gap-1 text-sm">
+                            "Photo"
+                            <input name="photo" type="file" accept="image/*"
+                                class="text-sm text-zinc-400" />
+                        </label>
+                        <button
+                            class="cursor-pointer rounded-md bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-500"
+                        >
+                            "Add"
+                        </button>
+                    </form>
+                    <ul class="mt-4 divide-y divide-zinc-800">
+                        for product in &products.items {
+                            <li class="flex flex-wrap items-center gap-4 py-3">
+                                <div class="min-w-0 flex-1">
+                                    <p class="truncate text-sm font-semibold text-zinc-200">
+                                        (product.title.clone().unwrap_or_default())
+                                    </p>
+                                    <p class="text-xs text-zinc-500">
+                                        (portal_price_ug(product.price))
+                                        " · stock " (product.stock.unwrap_or(0))
+                                    </p>
+                                </div>
+                                <form method="post"
+                                    action=("/shop/product/".to_owned() + &product.product_id.clone().unwrap_or_default() + "/visibility")
+                                    class="flex items-center gap-2"
+                                >
+                                    <input type="hidden" name="is_public"
+                                        value=(if product.is_public.unwrap_or(false) { "off" } else { "on" }) />
+                                    <span class="text-xs text-zinc-500">
+                                        if product.is_public.unwrap_or(false) { "listed" } else { "hidden" }
+                                    </span>
+                                    <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-emerald-500"
+                                        type="submit">
+                                        "Publish settings"
+                                    </button>
+                                </form>
+                            </li>
+                        }
+                    </ul>
+                </div>
+                <div class="mt-4 rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+                    <h3 class="mb-3 text-sm font-medium text-zinc-400">"Orders"</h3>
+                    <ul class="divide-y divide-zinc-800">
+                        for order in &orders.items {
+                            <li class="flex flex-wrap items-center gap-4 py-3">
+                                <div class="min-w-0 flex-1">
+                                    <p class="text-sm text-zinc-300">
+                                        "Order " (order.order_id.clone().unwrap_or_default())
+                                        " · " (order.quantity.unwrap_or(0)) "x"
+                                    </p>
+                                    <p class="text-xs text-zinc-500">
+                                        (order.created_at.unwrap_or(0)) " · user " (order.user_id.unwrap_or(0))
+                                    </p>
+                                </div>
+                                <span class=("rounded-full border px-2 py-0.5 text-xs ".to_owned()
+                                    + portal_status_class(order.status.as_deref().unwrap_or("")))>
+                                    (order.status.clone().unwrap_or_default())
+                                </span>
+                                <div class="flex gap-2">
+                                    if order.status.as_deref() == Some("pending") {
+                                        <form method="post" action=("/shop/orders/".to_owned() + &order.order_id.clone().unwrap_or_default() + "/status")>
+                                            <input type="hidden" name="status" value="accepted" />
+                                            <button class="cursor-pointer rounded-md bg-sky-700 px-3 py-1 text-xs font-semibold text-white transition hover:bg-sky-600">"Accept"</button>
+                                        </form>
+                                        <form method="post" action=("/shop/orders/".to_owned() + &order.order_id.clone().unwrap_or_default() + "/status")>
+                                            <input type="hidden" name="status" value="cancelled" />
+                                            <button class="cursor-pointer rounded-md bg-rose-800 px-3 py-1 text-xs font-semibold text-white transition hover:bg-rose-700">"Cancel"</button>
+                                        </form>
+                                    } else if order.status.as_deref() == Some("accepted") {
+                                        <form method="post" action=("/shop/orders/".to_owned() + &order.order_id.clone().unwrap_or_default() + "/status")>
+                                            <input type="hidden" name="status" value="done" />
+                                            <button class="cursor-pointer rounded-md bg-emerald-700 px-3 py-1 text-xs font-semibold text-white transition hover:bg-emerald-600">"Mark done"</button>
+                                        </form>
+                                    }
+                                </div>
+                            </li>
+                        }
+                    </ul>
+                </div>
+            </section>
+        }
+
+        if tenant.has_app("media") {
+            let library: media_app::models::MediaLibrary =
+                db.query(media_app::models::list_library_by_tenant(tenant_id)?).await?;
+            let media_orders: media_app::models::MediaOrderPage =
+                db.query(media_app::models::media_orders_by_tenant(tenant_id)?).await?;
+
+            <section class="mb-10">
+                <h2 class="mb-3 text-xl font-semibold">"Media sales"</h2>
+                <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+                    <h3 class="mb-3 text-sm font-medium text-zinc-400">"Pricing"</h3>
+                    <ul class="divide-y divide-zinc-800">
+                        for item in &library.items {
+                            <li class="flex flex-wrap items-center gap-4 py-3">
+                                <div class="min-w-0 flex-1">
+                                    <p class="truncate text-sm font-semibold text-zinc-200">
+                                        (item.title.clone().unwrap_or_default())
+                                    </p>
+                                    <p class="text-xs text-zinc-500">
+                                        (portal_price_ug(item.price))
+                                    </p>
+                                </div>
+                                <form method="post"
+                                    action=("/media-library/".to_owned() + &item.media_item_id.clone().unwrap_or_default() + "/price")
+                                    class="flex items-end gap-2"
+                                >
+                                    <label class="flex flex-col gap-1 text-xs text-zinc-400">
+                                        "Price (UGX, 0 = free)"
+                                        <input name="price_ugx" type="number" min="0" step="1"
+                                            value=(item.price.unwrap_or(0))
+                                            class="w-28 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                                    </label>
+                                    <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1.5 text-xs transition hover:border-emerald-500"
+                                        type="submit">
+                                        "Set price"
+                                    </button>
+                                </form>
+                            </li>
+                        }
+                    </ul>
+                </div>
+                <div class="mt-4 rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+                    <h3 class="mb-3 text-sm font-medium text-zinc-400">"Sales"</h3>
+                    <ul class="divide-y divide-zinc-800">
+                        for order in &media_orders.items {
+                            <li class="flex flex-wrap items-center gap-4 py-3">
+                                <div class="min-w-0 flex-1">
+                                    <p class="text-sm text-zinc-300">
+                                        "Order " (order.order_id.clone().unwrap_or_default())
+                                        " · item " (order.media_item_id.clone().unwrap_or_default())
+                                    </p>
+                                    <p class="text-xs text-zinc-500">
+                                        "user " (order.user_id.unwrap_or(0))
+                                    </p>
+                                </div>
+                                <span class=("rounded-full border px-2 py-0.5 text-xs ".to_owned()
+                                    + portal_status_class(order.status.as_deref().unwrap_or("")))>
+                                    (order.status.clone().unwrap_or_default())
+                                </span>
+                                <div class="flex gap-2">
+                                    if order.status.as_deref() == Some("pending") {
+                                        <form method="post" action=("/media/orders/".to_owned() + &order.order_id.clone().unwrap_or_default() + "/status")>
+                                            <input type="hidden" name="status" value="accepted" />
+                                            <button class="cursor-pointer rounded-md bg-sky-700 px-3 py-1 text-xs font-semibold text-white transition hover:bg-sky-600">"Accept"</button>
+                                        </form>
+                                        <form method="post" action=("/media/orders/".to_owned() + &order.order_id.clone().unwrap_or_default() + "/status")>
+                                            <input type="hidden" name="status" value="cancelled" />
+                                            <button class="cursor-pointer rounded-md bg-rose-800 px-3 py-1 text-xs font-semibold text-white transition hover:bg-rose-700">"Cancel"</button>
+                                        </form>
+                                    } else if order.status.as_deref() == Some("accepted") {
+                                        <form method="post" action=("/media/orders/".to_owned() + &order.order_id.clone().unwrap_or_default() + "/status")>
+                                            <input type="hidden" name="status" value="done" />
+                                            <button class="cursor-pointer rounded-md bg-emerald-700 px-3 py-1 text-xs font-semibold text-white transition hover:bg-emerald-600">"Mark done"</button>
+                                        </form>
+                                    }
+                                </div>
+                            </li>
+                        }
+                    </ul>
+                </div>
+            </section>
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------
-
 /// `POST /admin/applications/approve`: activate a pending application with
 /// the given quota; the applicant becomes the tenant admin.
 #[route(POST "/admin/applications/approve")]
@@ -969,6 +1168,25 @@ fn optional_i64(raw: Option<String>) -> Option<i64> {
 /// Render an id as a form value (`None` → empty string).
 fn id_text(id: Option<i64>) -> String {
     id.map_or_else(String::new, |v| v.to_string())
+}
+
+/// Format a stored price (UGX shillings) for the portal.
+fn portal_price_ug(price: Option<i64>) -> String {
+    match price {
+        Some(p) if p > 0 => format!("UGX {p}"),
+        _ => "free".to_string(),
+    }
+}
+
+/// Tailwind class for an order-status badge in the portal.
+fn portal_status_class(status: &str) -> &'static str {
+    match status {
+        "pending" => "border-amber-800 bg-amber-950/40 text-amber-200",
+        "accepted" => "border-sky-700 bg-sky-900/40 text-sky-200",
+        "done" => "border-emerald-900 bg-emerald-950/60 text-emerald-300",
+        "cancelled" => "border-red-800 bg-red-950/40 text-red-300",
+        _ => "border-zinc-700 bg-zinc-800 text-zinc-400",
+    }
 }
 
 fn role_badge(role: Role) -> &'static str {

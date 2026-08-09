@@ -423,6 +423,29 @@ async fn media_detail(cx: &Cx) -> Result {
     };
     let item_is_public = item.and_then(|it| it.is_public) == Some(true);
 
+    // Sale state: the current user's own order on this item (if any) and
+    // whether they are entitled to download the file.
+    let my_order = match (raw_id, current.user.user_id) {
+        (_, Some(user_id)) => {
+            let orders: models::MediaOrderPage =
+                db.query(models::media_order_by_item_and_user(raw_id.to_owned(), user_id)?)
+                    .await?;
+            orders.items.into_iter().next()
+        }
+        (_, None) => None,
+    };
+    let my_order_ok = my_order
+        .as_ref()
+        .and_then(|o| o.status.as_deref())
+        .is_some_and(|s| matches!(s, "accepted" | "done"));
+    let item_is_free = item.and_then(|it| it.price).unwrap_or(0) <= 0;
+    let same_tenant = item
+        .and_then(|it| it.tenant_id)
+        .zip(current.user.tenant_id)
+        .map_or(false, |(a, b)| a == b && a > 0);
+    let can_download = !can_manage && (item_is_free || my_order_ok || same_tenant);
+    let sale_cents = item.and_then(|it| it.price).unwrap_or(0);
+
     view! {
         <a class="mb-4 inline-block text-sm text-sky-400 hover:text-sky-300" href="/media-library">
             "← Back to library"
@@ -431,6 +454,55 @@ async fn media_detail(cx: &Cx) -> Result {
             Some(item) => {
                 <h1 class="text-3xl font-bold">"Now playing"</h1>
                 components::player(item: item, stream_url: stream_url.as_deref())
+                if !can_manage && sale_cents > 0 {
+                    <div
+                        class="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3"
+                    >
+                        <span class="text-lg font-semibold text-amber-300">
+                            (format_price(sale_cents))
+                        </span>
+                        match my_order.as_ref().and_then(|o| o.status.as_deref()) {
+                            Some("pending") => {
+                                <span class="text-sm text-zinc-400">"Order pending — the seller will confirm."</span>
+                            },
+                            Some("accepted" | "done") => {
+                                <a
+                                    class="rounded-md border border-emerald-700 bg-emerald-900/40 px-3 py-1 text-sm text-emerald-200 transition hover:bg-emerald-800/40"
+                                    href=("/media/".to_owned() + raw_id + "/download")
+                                >
+                                    "Download"
+                                </a>
+                            },
+                            Some("cancelled") | Some(_) => {
+                                <form method="post" action=("/media/".to_owned() + raw_id + "/order")>
+                                    <button
+                                        class="cursor-pointer rounded-md bg-amber-600 px-3 py-1 text-sm font-semibold text-white transition hover:bg-amber-500"
+                                    >
+                                        "Buy again"
+                                    </button>
+                                </form>
+                            },
+                            None => {
+                                <form method="post" action=("/media/".to_owned() + raw_id + "/order")>
+                                    <button
+                                        class="cursor-pointer rounded-md bg-amber-600 px-3 py-1 text-sm font-semibold text-white transition hover:bg-amber-500"
+                                    >
+                                        "Buy"
+                                    </button>
+                                </form>
+                            },
+                        }
+                    </div>
+                } else if !can_manage && can_download {
+                    <div class="mt-4 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                        <a
+                            class="inline-block rounded-md border border-emerald-700 bg-emerald-900/40 px-3 py-1 text-sm text-emerald-200 transition hover:bg-emerald-800/60"
+                            href=("/media/".to_owned() + raw_id + "/download")
+                        >
+                            "Download"
+                        </a>
+                    </div>
+                }
                 if can_manage {
                     <form
                         class="mt-6 flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3"
@@ -452,6 +524,29 @@ async fn media_detail(cx: &Cx) -> Result {
                             type="submit"
                         >
                             "Publish settings"
+                        </button>
+                    </form>
+                    <form
+                        class="mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3"
+                        method="post"
+                        action=("/media-library/".to_owned() + raw_id + "/price")
+                    >
+                        <label class="flex flex-col gap-1 text-sm text-zinc-300">
+                            "Sale price (UGX, 0 = free)"
+                            <input
+                                class="w-32 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-400"
+                                type="number"
+                                name="price_ugx"
+                                min="0"
+                                step="1"
+                                value=(sale_cents)
+                            />
+                        </label>
+                        <button
+                            class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-emerald-500"
+                            type="submit"
+                        >
+                            "Set price"
                         </button>
                     </form>
                 }
@@ -557,4 +652,199 @@ fn infer_content_type(file_name: &str) -> &'static str {
     else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") { "image/jpeg" }
     else if lower.ends_with(".png") { "image/png" }
     else { "application/octet-stream" }
+}
+
+/// `POST /media/{id}/order`: a signed-in user asks for an item; the owning
+/// tenant's admins settle it from their portal sales board. Free items and
+/// already-entitled users are redirected straight to the item page.
+#[route(POST "/media/{id}/order")]
+async fn media_order(cx: &Cx) -> Result<SeeOther> {
+    let raw_id: &str = path_param::<Id>(cx);
+    let auth = platform_core::auth(cx);
+    let Some(current) = auth.current_user(cx).await? else {
+        return Ok(see_other("/login"));
+    };
+    let Some(user_id) = current.user.user_id else {
+        return Ok(see_other(&format!("/media-library/{raw_id}")));
+    };
+    let db = platform_core::db(cx);
+
+    let detail: models::MediaDetail =
+        db.query(models::media_item_by_id(raw_id.to_owned())?).await?;
+    let Some(item) = detail.item.first() else {
+        return Ok(see_other(&format!("/media-library/{raw_id}")));
+    };
+    let Some(tenant_id) = item.tenant_id.filter(|t| *t > 0) else {
+        return Ok(see_other(&format!("/media-library/{raw_id}")));
+    };
+    let buyable = item.is_public == Some(true)
+        || current.user.tenant_id.map_or(false, |t| t == tenant_id);
+    if !buyable {
+        return Ok(see_other(&format!("/media-library/{raw_id}")));
+    }
+    if item.price.unwrap_or(0) <= 0 {
+        return Ok(see_other(&format!("/media-library/{raw_id}")));
+    }
+
+    let pattern: models::MediaOrderPage =
+        db.query(models::media_order_by_item_and_user(raw_id.to_owned(), user_id)?)
+            .await?;
+    if let Some(order) = pattern.items.first() {
+        if matches!(order.status.as_deref(), Some("accepted" | "done")) {
+            return Ok(see_other(&format!("/media-library/{raw_id}")));
+        }
+        if order.status.as_deref() == Some("pending") {
+            return Ok(see_other(&format!("/media-library/{raw_id}")));
+        }
+    }
+
+    let order_id = format!("mo-{}-{:x}", raw_id, std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0));
+    let _: serde_json::Value = db
+        .query(models::create_media_order(
+            order_id,
+            raw_id.to_owned(),
+            tenant_id,
+            user_id,
+        )?)
+        .await?;
+    Ok(see_other(&format!("/media-library/{raw_id}")))
+}
+
+/// Stable ticket statuses mirroring the marketplace: pending → accepted |
+/// cancelled, then done by the seller's staff.
+const MEDIA_ORDER_STATUSES: &[(&str, &str)] = &[
+    ("accepted", "Accept"),
+    ("cancelled", "Cancel"),
+    ("done", "Mark done"),
+];
+
+/// `POST /media/orders/<id>/status`: the owning tenant's admin (or the
+/// platform owner) settles a purchase ticket.
+#[route(POST "/media/orders/{id}/status")]
+async fn media_order_status(Form(form): Form<OrderStatusForm>, cx: &Cx) -> Result<SeeOther> {
+    let raw_id: &str = path_param::<Id>(cx);
+    let auth = platform_core::auth(cx);
+    let Some(current) = auth.current_user(cx).await? else {
+        return Ok(see_other("/login"));
+    };
+    let db = platform_core::db(cx);
+
+    let tenant_id = current.user.tenant_id.filter(|t| *t > 0);
+    let is_owner = current.user.role() == platform_core::Role::Owner;
+    if !is_owner && tenant_id.is_none() {
+        return Ok(see_other("/portal"));
+    }
+    let allowed_status = MEDIA_ORDER_STATUSES
+        .iter()
+        .any(|(value, _)| *value == form.status);
+    if !allowed_status {
+        return Ok(see_other("/portal"));
+    }
+    if !is_owner {
+        let orders: models::MediaOrderPage =
+            db.query(models::media_orders_by_tenant(tenant_id.unwrap_or(0))?).await?;
+        if !orders.items.iter().any(|o| o.order_id.as_deref() == Some(raw_id)) {
+            return Ok(see_other("/portal"));
+        }
+    }
+    let _: serde_json::Value =
+        db.query(models::set_media_order_status(raw_id.to_owned(), form.status.clone())?)
+            .await?;
+    Ok(see_other("/portal"))
+}
+
+#[derive(Deserialize)]
+struct OrderStatusForm {
+    status: String,
+}
+
+/// The file itself for an entitled user. Free items and items with an
+/// `accepted`/`done` order presign the stored object and bounce there.
+/// (The presigned URL is the download: it expires in 15 minutes.)
+#[route(GET "/media/{id}/download")]
+async fn media_download(cx: &Cx) -> Result {
+    let raw_id: &str = path_param::<Id>(cx);
+    let auth = platform_core::auth(cx);
+    let Some(current) = auth.current_user(cx).await? else {
+        return Err(redirect("/login").into());
+    };
+    let db = platform_core::db(cx);
+    let storage = platform_core::storage(cx);
+
+    let detail: models::MediaDetail =
+        db.query(models::media_item_by_id(raw_id.to_owned())?).await?;
+    let Some(item) = detail.item.first() else {
+        return Err(redirect("/media-library").into());
+    };
+    let Some(key) = item.stream_key.as_deref() else {
+        return Err(redirect("/media-library").into());
+    };
+
+    if item.price.unwrap_or(0) > 0 {
+        let staff = current
+            .user
+            .tenant_id
+            .zip(item.tenant_id)
+            .map_or(false, |(a, b)| a == b && a > 0);
+        if !staff {
+            let orders: models::MediaOrderPage = db
+                .query(models::media_order_by_item_and_user(
+                    raw_id.to_owned(),
+                    current.user.user_id.unwrap_or(0),
+                )?)
+                .await?;
+            if !orders.items.iter().any(|o| {
+                matches!(o.status.as_deref(), Some("accepted" | "done"))
+            }) {
+                return Err(redirect(&format!("/media-library/{raw_id}")).into());
+            }
+        }
+    }
+
+    let url = storage.presign_get(key, 900).await?;
+    Err(redirect(&url).into())
+}
+
+/// Format minor units as dollars for the shop and studio cards.
+fn format_price(price: i64) -> String {
+    format!("UGX {price}")
+}
+
+/// `POST /media-library/<id>/price`: the owning tenant's admin (or platform
+/// owner) sets the item's sale price in UGX shillings (0 = free).
+#[route(POST "/media-library/{id}/price")]
+async fn media_price(Form(form): Form<PriceForm>, cx: &Cx) -> Result<SeeOther> {
+    let raw_id: &str = path_param::<Id>(cx);
+    let auth = platform_core::auth(cx);
+    let Some(current) = auth.current_user(cx).await? else {
+        return Ok(see_other("/login"));
+    };
+    let db = platform_core::db(cx);
+
+    let detail: models::MediaDetail =
+        db.query(models::media_item_by_id(raw_id.to_owned())?).await?;
+    let Some(item) = detail.item.first() else { return Ok(see_other("/media-library")) };
+
+    let can_manage = match (current.user.role(), item.tenant_id) {
+        (platform_core::Role::Owner, _) => true,
+        (role, Some(item_tenant)) if item_tenant > 0 => {
+            role.is_at_least(platform_core::Role::TenantAdmin)
+                && current.user.tenant_id == Some(item_tenant)
+        }
+        _ => false,
+    };
+    if !can_manage {
+        return Ok(see_other(&format!("/media-library/{raw_id}")));
+    }
+    let _: serde_json::Value =
+        db.query(models::set_item_price(raw_id.to_owned(), form.price_ugx)?).await?;
+    Ok(see_other(&format!("/media-library/{raw_id}")))
+}
+
+#[derive(Deserialize)]
+struct PriceForm {
+    price_ugx: i64,
 }

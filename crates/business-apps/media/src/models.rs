@@ -27,6 +27,11 @@ pub struct MediaItem {
     pub tenant_id: Option<i64>,
     /// Tenant-admin controlled: shown on the tenant's public surface.
     pub is_public: Option<bool>,
+    /// Sale price in minor units (`currency`); absent/0 = free to view and
+    /// download. Set by the owning tenant's admins from their portal.
+    pub price: Option<i64>,
+    /// ISO-4217 currency code for [`MediaItem::price`].
+    pub currency: Option<String>,
 }
 
 /// Response shape of [`list_library`].
@@ -52,6 +57,21 @@ fn not_deleted() -> Predicate {
     Predicate::is_null(props::DELETED_AT)
 }
 
+/// The canonical item projection: id, meta, storage key, tenancy, sale price.
+fn project_item() -> Vec<PropertyProjection> {
+    vec![
+        PropertyProjection::new(props::MEDIA_ITEM_ID),
+        PropertyProjection::new(props::TITLE),
+        PropertyProjection::new(props::RELEASE_YEAR),
+        PropertyProjection::new(props::DURATION_SEC),
+        PropertyProjection::new(props::STREAM_KEY),
+        PropertyProjection::new(props::TENANT_ID),
+        PropertyProjection::new(props::IS_PUBLIC),
+        PropertyProjection::new(props::PRICE),
+        PropertyProjection::new(props::CURRENCY),
+    ]
+}
+
 /// Public library: non-deleted media items, newest release year first.
 #[query]
 pub fn list_library() -> db::ReadBatch {
@@ -62,15 +82,7 @@ pub fn list_library() -> db::ReadBatch {
                 .where_(not_deleted())
                 .order_by(props::RELEASE_YEAR, Order::Desc)
                 .limit(100usize)
-                .project(vec![
-                    PropertyProjection::new(props::MEDIA_ITEM_ID),
-                    PropertyProjection::new(props::TITLE),
-                    PropertyProjection::new(props::RELEASE_YEAR),
-                    PropertyProjection::new(props::DURATION_SEC),
-                    PropertyProjection::new(props::STREAM_KEY),
-                    PropertyProjection::new(props::TENANT_ID),
-                    PropertyProjection::new(props::IS_PUBLIC),
-                ]),
+                .project(project_item()),
         )
         .returning(["items"])
 }
@@ -85,15 +97,7 @@ pub fn list_library_by_tenant(tenant_id: i64) -> db::ReadBatch {
                 .where_(Predicate::eq(props::TENANT_ID, tenant_id))
                 .order_by(props::RELEASE_YEAR, Order::Desc)
                 .limit(100usize)
-                .project(vec![
-                    PropertyProjection::new(props::MEDIA_ITEM_ID),
-                    PropertyProjection::new(props::TITLE),
-                    PropertyProjection::new(props::RELEASE_YEAR),
-                    PropertyProjection::new(props::DURATION_SEC),
-                    PropertyProjection::new(props::STREAM_KEY),
-                    PropertyProjection::new(props::TENANT_ID),
-                    PropertyProjection::new(props::IS_PUBLIC),
-                ]),
+                .project(project_item()),
         )
         .returning(["items"])
 }
@@ -157,15 +161,7 @@ pub fn media_item_by_id(media_item_id: String) -> db::ReadBatch {
             "item",
             g().n_with_label(labels::MEDIA_ITEM)
                 .where_(Predicate::eq(props::MEDIA_ITEM_ID, media_item_id))
-                .project(vec![
-                    PropertyProjection::new(props::MEDIA_ITEM_ID),
-                    PropertyProjection::new(props::TITLE),
-                    PropertyProjection::new(props::RELEASE_YEAR),
-                    PropertyProjection::new(props::DURATION_SEC),
-                    PropertyProjection::new(props::STREAM_KEY),
-                    PropertyProjection::new(props::TENANT_ID),
-                    PropertyProjection::new(props::IS_PUBLIC),
-                ]),
+                .project(project_item()),
         )
         .returning(["item"])
 }
@@ -279,15 +275,7 @@ pub fn public_items_by_tenant(tenant_id: i64) -> db::ReadBatch {
                 .where_(Predicate::is_null(props::DELETED_AT))
                 .order_by(props::RELEASE_YEAR, Order::Desc)
                 .limit(100usize)
-                .project(vec![
-                    PropertyProjection::new(props::MEDIA_ITEM_ID),
-                    PropertyProjection::new(props::TITLE),
-                    PropertyProjection::new(props::RELEASE_YEAR),
-                    PropertyProjection::new(props::DURATION_SEC),
-                    PropertyProjection::new(props::STREAM_KEY),
-                    PropertyProjection::new(props::TENANT_ID),
-                    PropertyProjection::new(props::IS_PUBLIC),
-                ]),
+                .project(project_item()),
         )
         .returning(["items"])
 }
@@ -305,4 +293,135 @@ pub fn set_item_public(media_item_id: String, is_public: bool) -> db::WriteBatch
                 .set_property(props::UPDATED_AT, Expr::timestamp()),
         )
         .returning(["item"])
+}
+
+/// Tenant-admin SET: the item's sale price in minor units (`price` 0 = free).
+#[query]
+pub fn set_item_price(media_item_id: String, price: i64) -> db::WriteBatch {
+    write_batch()
+        .var_as(
+            "item",
+            g().n_with_label(labels::MEDIA_ITEM)
+                .where_(Predicate::eq(props::MEDIA_ITEM_ID, media_item_id))
+                .set_property(props::PRICE, PropertyInput::param("price"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
+        )
+        .returning(["item"])
+}
+
+/// A media purchase ticket: a signed-in user asked for the item. Statuses
+/// mirror the marketplace: `pending` → `accepted`|`cancelled`, then `done`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaOrder {
+    pub order_id: Option<String>,
+    pub media_item_id: Option<String>,
+    pub tenant_id: Option<i64>,
+    /// The platform user who placed the order.
+    pub user_id: Option<i64>,
+    pub status: Option<String>,
+    pub created_at: Option<i64>,
+}
+
+/// Response shape of the order queries.
+#[derive(Debug, serde::Deserialize)]
+pub struct MediaOrderPage {
+    pub items: Vec<MediaOrder>,
+}
+
+fn project_order() -> Vec<PropertyProjection> {
+    vec![
+        PropertyProjection::new(props::ORDER_ID),
+        PropertyProjection::new(props::MEDIA_ITEM_ID),
+        PropertyProjection::new(props::TENANT_ID),
+        PropertyProjection::new(props::USER_ID),
+        PropertyProjection::new(props::STATUS),
+        PropertyProjection::new(props::CREATED_AT),
+    ]
+}
+
+/// The buyer's own order on one item (at most one row in practice).
+#[query]
+pub fn media_order_by_item_and_user(media_item_id: String, user_id: i64) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "items",
+            g().n_with_label(labels::MEDIA_ORDER)
+                .where_(Predicate::eq(props::MEDIA_ITEM_ID, media_item_id))
+                .where_(Predicate::eq(props::USER_ID, user_id))
+                .limit(1usize)
+                .project(project_order()),
+        )
+        .returning(["items"])
+}
+
+/// Every order a buyer has placed (their purchases page).
+#[query]
+pub fn media_orders_by_user(user_id: i64) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "items",
+            g().n_with_label(labels::MEDIA_ORDER)
+                .where_(Predicate::eq(props::USER_ID, user_id))
+                .order_by(props::CREATED_AT, Order::Desc)
+                .limit(500usize)
+                .project(project_order()),
+        )
+        .returning(["items"])
+}
+
+/// Every order against one tenant's items: the portal sales board.
+#[query]
+pub fn media_orders_by_tenant(tenant_id: i64) -> db::ReadBatch {
+    read_batch()
+        .var_as(
+            "items",
+            g().n_with_label(labels::MEDIA_ORDER)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .order_by(props::CREATED_AT, Order::Desc)
+                .limit(500usize)
+                .project(project_order()),
+        )
+        .returning(["items"])
+}
+
+/// Place an order: a new `pending` ticket for the buying user.
+#[query]
+pub fn create_media_order(
+    order_id: String,
+    media_item_id: String,
+    tenant_id: i64,
+    user_id: i64,
+) -> db::WriteBatch {
+    write_batch()
+        .var_as(
+            "order",
+            g().add_n(
+                labels::MEDIA_ORDER,
+                vec![
+                    (props::ORDER_ID, PropertyInput::param("order_id")),
+                    (props::MEDIA_ITEM_ID, PropertyInput::param("media_item_id")),
+                    (props::TENANT_ID, PropertyInput::param("tenant_id")),
+                    (props::USER_ID, PropertyInput::param("user_id")),
+                    (props::STATUS, PropertyInput::from("pending")),
+                    (props::CREATED_AT, PropertyInput::Expr(Expr::timestamp())),
+                    (props::UPDATED_AT, PropertyInput::Expr(Expr::timestamp())),
+                ],
+            ),
+        )
+        .returning(["order"])
+}
+
+/// Tenant staff flips a sales ticket's status (accept / cancel / done).
+#[query]
+pub fn set_media_order_status(order_id: String, status: String) -> db::WriteBatch {
+    write_batch()
+        .var_as(
+            "order",
+            g().n_with_label(labels::MEDIA_ORDER)
+                .where_(Predicate::eq(props::ORDER_ID, order_id))
+                .set_property(props::STATUS, PropertyInput::param("status"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
+        )
+        .returning(["order"])
 }
