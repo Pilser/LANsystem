@@ -61,9 +61,10 @@ LANsystem/
 │   ├── ui/                          # shared Tailwind components
 │   └── business-apps/               # ★ domain apps (see §6) + §4 console
 │       ├── app-contract/            #   the "BusinessApp" plugin trait + registry
-│       ├── admin/                   #   ★ Control console: apps, tenants, users
+│       ├── admin/                   #   ★ owner console: applications, tenants, users, domain policies
 │       ├── media/                   #   media server: films, songs, downloads
 │       ├── marketplace/             #   virtual marketplace
+│       ├── onboarding/              #   ★ public application flow: apply, (pay), status
 │       ├── news/                    #   news feed
 │       ├── ordering/                #   (future) ordering service
 │       └── delivery/                #   (future) delivery service
@@ -82,25 +83,27 @@ The system is multi-user and multi-tenant. Each app is a **domain** shared by
 
 ```text
 owner — the platform admin (you)
+├── platform console (/admin): applications, tenants, users, domain policies
 ├── media-library domain (one server, one database)
-│    ├── tenant "Rashid's Cinema"     → tenant_admin + members/clients
-│    └── tenant "Alfur Studios"       → suspended business, its data isolated
-└── delivery domain (future app)
-     └── tenant "…"
+│    └── tenant "Rashid's Cinema"   → first business admin + members/clients
+└── marketplace domain
+     └── tenant "Harbor Blue Moon"  → first business admin
 ```
 
 ### Roles
 
 | Role | Scope | Power |
 |---|---|---|
-| `owner` | platform | enable/disable an app for a tenant, create/suspend tenants, set storage quotas |
-| `tenant_admin` | one tenant | manage that tenant's users (activate/deactivate, roles) and its content |
+| `owner` | platform | approve/reject applications, set quotas, suspend tenants, configure domain policies |
+| `tenant_admin` | one tenant | manage that tenant's users (activate/deactivate, roles) and its content, via the **tenant portal** |
 | `member` | one tenant | uses the tenant's services |
+| `applicant` | — | a signed-up account with no tenant yet; sees only its **application status page** until approved |
 
-App-level control passes down the tree exactly like the parent admin console:
-platform `owner` governs every tenant on every domain app, and each `tenant_admin`
-governs the members of their own tenant — including toggling the tenant's billing
-hook, so a business decides "my media library calls my billing endpoint".
+The owner never creates a tenant on behalf of a business. Every tenant is born
+from a **public application** (§4a): the first person of the business signs up,
+applies for a domain, and the owner approves. On approval the applicant becomes
+`tenant_admin` of the new tenant. Neither owner nor tenant admin runs the other's
+UI: `/admin` is the owner console only, `/portal` is the tenant admin portal.
 
 ### Decisions
 
@@ -110,9 +113,13 @@ hook, so a business decides "my media library calls my billing endpoint".
 - **Enablement is data, not build config.** Apps stay compile-time crates (§6), but the
   per-tenant on/off list, quotas, and status live on the `Tenant` node
   (`appsEnabled`, `storageQuotaBytes`, `storageUsedBytes`, `status`).
-- **The Control console is a normal business app** — `crates/business-apps/admin`,
-  display name "Control". Owner view: all apps + tenants, disable an app, suspend a
-  tenant, set quotas. Tenant-admin view: that tenant's users and roles.
+- **Tenant lifecycle drives itself through statuses.** `pending` → `active` /
+  `rejected` (later `suspended`). The public feed only lists `active && isPublic`,
+  so `pending` businesses are invisible until approved and published by their admin.
+- **The owner console is a normal business app** — `crates/business-apps/admin`,
+  display name "Console", owner role only: applications to approve, tenants
+  (quota/suspend), users, and **domain policies** (see §4a). The tenant portal
+  (`/portal`) is the same app's tenant-admin view without the owner controls.
 - **Isolation is query-level.** Every tenant-owned node carries `tenantId`; every domain
   query filters it first (§11). One server, one database, hard per-tenant scoping.
 - **Billing is a plug-in, never core (the MikroTik pattern).** The engine is mechanism;
@@ -127,6 +134,47 @@ hook, so a business decides "my media library calls my billing endpoint".
   user's sessions (and short-lived presigns) mid-watch — a subscription expiry stops
   the stream instantly with no new code in the app.
 - **Phase 5 (later):** host → tenant mapping, so a tenant can get its own subdomain.
+
+### 4a. Domain onboarding: how businesses enter (decided)
+
+Businesses self-sign from the **public directory** (`/public` → "Create a
+business"), not through the owner. The flow lives in `crates/business-apps/onboarding`:
+
+```text
+/public "Create a business" button
+        │  POST /apply  (name, domain, applicant's email + password)
+        ▼
+payment gate? (domain policy: paymentRequired)
+        ├─ yes ─► POST domain.paymentWebhookUrl  →  { "paid": true|false }
+        │              paid:false ──► application status "rejected (payment)", applicant may retry
+        ▼
+Tenant{ status:"pending" } + applicant User (role member, no tenant)
+        ▼
+/app (status page)  ←─ applicant's only page until approved
+        ▼
+owner console: Approve (set quota by using existing quota field) / Reject
+        ▼
+status:"active"  + applicant becomes tenant_admin of the tenant
+```
+
+- **A business is born only by approval.** Pending tenants cost nothing, are
+  invisible on `/public`, and enforce no domain app rights, so quotas only
+  matter when the owner resources the tenant.
+- **`TenantApplication`-free model:** an application *is* a `Tenant` node with
+  `status: "pending"` (plus `paymentStatus: "none"|"paid"|"declined"` and the
+  applicant's `userId`). No second node type; approval flips a fixture into a
+  working tenant.
+- **Payment gate is per-domain policy.** The owner configures on the console:
+  `DomainPolicy{ domain, paymentRequired, paymentWebhookUrl }`. Only *selected*
+  domains force payment at apply time. Webhook contract details in §13.
+  Approval is deliberately decoupled from money: "pay first, we approve after" —
+  the webhook says *paid*, the owner still decides *approved*.
+- **Portal split.** `tenant_admin` lands on `/portal` (their tenant's users and
+  content + billing toggle), never on `/admin`. `owner` only sees `/admin`.
+  Members without an approved tenant land on their application status page.
+- **Existing demo businesses (Rashid's Cinema, Harbor Blue Moon, …) were wiped**
+  when this flow landed and re-created through the apply → approve path, so the
+  public feed always traces back to a real application.
 
 ### Enforcement order (in `platform/core`)
 

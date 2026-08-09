@@ -2,7 +2,9 @@
 //!
 //! Anchor narrow, filter tenant first, prefer `write_batch()` for mutations.
 
-use crate::models::TENANT_STATUS_ACTIVE;
+use crate::models::{
+    PAYMENT_STATUS_NONE, TENANT_STATUS_ACTIVE, TENANT_STATUS_PENDING,
+};
 use db::query;
 use db::schema::{labels, props};
 use db::{
@@ -164,6 +166,8 @@ pub fn all_tenants() -> ReadBatch {
                     PropertyProjection::new(props::AUTH_WEBHOOK_URL),
                     PropertyProjection::new(props::IS_PUBLIC),
                     PropertyProjection::new(props::DESCRIPTION),
+                    PropertyProjection::new(props::APPLICANT_ID),
+                    PropertyProjection::new(props::PAYMENT_STATUS),
                     PropertyProjection::new(props::CREATED_AT),
                 ]),
         )
@@ -189,6 +193,8 @@ pub fn tenant_by_id(tenant_id: i64) -> ReadBatch {
                     PropertyProjection::new(props::AUTH_WEBHOOK_URL),
                     PropertyProjection::new(props::IS_PUBLIC),
                     PropertyProjection::new(props::DESCRIPTION),
+                    PropertyProjection::new(props::APPLICANT_ID),
+                    PropertyProjection::new(props::PAYMENT_STATUS),
                     PropertyProjection::new(props::CREATED_AT),
                 ]),
         )
@@ -207,6 +213,33 @@ pub fn tenant_by_name(tenant_name: String) -> ReadBatch {
                     PropertyProjection::new(props::TENANT_ID),
                     PropertyProjection::new(props::TENANT_NAME),
                     PropertyProjection::new(props::STATUS),
+                ]),
+        )
+        .returning(["tenant"])
+}
+
+/// The application of one applicant user (first row wins).
+#[query]
+pub fn tenant_by_applicant(applicant_id: i64) -> ReadBatch {
+    read_batch()
+        .var_as(
+            "tenant",
+            g().n_with_label(labels::TENANT)
+                .where_(Predicate::eq(props::APPLICANT_ID, applicant_id))
+                .limit(1usize)
+                .project(vec![
+                    PropertyProjection::new(props::TENANT_ID),
+                    PropertyProjection::new(props::TENANT_NAME),
+                    PropertyProjection::new(props::STATUS),
+                    PropertyProjection::new(props::APPS_ENABLED),
+                    PropertyProjection::new(props::STORAGE_QUOTA_BYTES),
+                    PropertyProjection::new(props::BILLING_ENABLED),
+                    PropertyProjection::new(props::AUTH_WEBHOOK_URL),
+                    PropertyProjection::new(props::IS_PUBLIC),
+                    PropertyProjection::new(props::DESCRIPTION),
+                    PropertyProjection::new(props::APPLICANT_ID),
+                    PropertyProjection::new(props::PAYMENT_STATUS),
+                    PropertyProjection::new(props::CREATED_AT),
                 ]),
         )
         .returning(["tenant"])
@@ -262,6 +295,98 @@ pub fn upsert_tenant_by_name(
                 .set_property(props::STORAGE_QUOTA_BYTES, PropertyInput::param("quota_bytes"))
                 .set_property(props::APPS_ENABLED, PropertyInput::param("apps_enabled"))
                 .set_property(props::UPDATED_AT, Expr::timestamp()),
+        )
+        .returning(["created", "updated"])
+}
+
+/// Birth of an application: a `pending` tenant tied to its applicant.
+#[query]
+pub fn create_application(
+    tenant_id: i64,
+    tenant_name: String,
+    apps_enabled: Vec<String>,
+    applicant_id: i64,
+) -> WriteBatch {
+    write_batch()
+        .var_as(
+            "created",
+            g().add_n(
+                labels::TENANT,
+                vec![
+                    (props::TENANT_NAME, PropertyInput::param("tenant_name")),
+                    (props::TENANT_ID, PropertyInput::param("tenant_id")),
+                    (props::STATUS, PropertyInput::from(TENANT_STATUS_PENDING)),
+                    (props::APPS_ENABLED, PropertyInput::param("apps_enabled")),
+                    (props::APPLICANT_ID, PropertyInput::param("applicant_id")),
+                    (props::PAYMENT_STATUS, PropertyInput::from(PAYMENT_STATUS_NONE)),
+                    (props::CREATED_AT, PropertyInput::Expr(Expr::timestamp())),
+                ],
+            ),
+        )
+        .returning(["created"])
+}
+
+/// The onboarding payment gate outcome on a tenant.
+#[query]
+pub fn set_tenant_payment(tenant_id: i64, payment_status: String) -> WriteBatch {
+    write_batch()
+        .var_as(
+            "tenant",
+            g().n_with_label(labels::TENANT)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .set_property(props::PAYMENT_STATUS, PropertyInput::param("payment_status"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
+        )
+        .returning(["tenant"])
+}
+
+/// All domain payment policies (`Domain` label nodes).
+#[query]
+pub fn domain_policies() -> ReadBatch {
+    read_batch()
+        .var_as(
+            "policies",
+            g().n_with_label(labels::DOMAIN_POLICY)
+                .project(vec![
+                    PropertyProjection::new(props::DOMAIN),
+                    PropertyProjection::new(props::PAYMENT_REQUIRED),
+                    PropertyProjection::new(props::PAYMENT_WEBHOOK_URL),
+                ]),
+        )
+        .returning(["policies"])
+}
+
+/// Upsert a domain's payment policy by unique domain name.
+#[query]
+pub fn upsert_domain_policy(
+    domain: String,
+    payment_required: bool,
+    payment_webhook_url: String,
+) -> WriteBatch {
+    write_batch()
+        .var_as(
+            "existing",
+            g().n_with_label(labels::DOMAIN_POLICY)
+                .where_(Predicate::eq(props::DOMAIN, domain.clone())),
+        )
+        .var_as_if(
+            "created",
+            BatchCondition::VarEmpty("existing".to_string()),
+            g().add_n(
+                labels::DOMAIN_POLICY,
+                vec![
+                    (props::DOMAIN, PropertyInput::param("domain")),
+                    (props::PAYMENT_REQUIRED, PropertyInput::param("payment_required")),
+                    (props::PAYMENT_WEBHOOK_URL, PropertyInput::param("payment_webhook_url")),
+                ],
+            ),
+        )
+        .var_as_if(
+            "updated",
+            BatchCondition::VarNotEmpty("existing".to_string()),
+            g().n(NodeRef::var("existing"))
+                .set_property(props::PAYMENT_REQUIRED, PropertyInput::param("payment_required"))
+                .set_property(props::PAYMENT_WEBHOOK_URL, PropertyInput::param("payment_webhook_url")),
         )
         .returning(["created", "updated"])
 }

@@ -84,18 +84,25 @@ pub async fn login_page(cx: &Cx) -> Result {
 }
 
 /// `POST /login`: verify credentials and start a session. Staff (the owner
-/// or a tenant admin) land straight into their console; everyone else goes
-/// to the launcher.
+/// or a tenant admin) land in the console/portal; members land in their app
+/// or, if they have no tenant yet, on their application status page.
 #[route(POST "/login")]
 pub async fn login(Form(form): Form<LoginForm>, cx: &Cx) -> Result<SeeOther> {
     let auth = app_context::<Auth>(cx);
     if auth.login(cx, &form.username, &form.password).await? {
-        let is_staff = auth
-            .authenticate(&form.username, &form.password)
-            .await?
-            .map(|user| user.role().is_at_least(crate::models::Role::TenantAdmin))
-            .unwrap_or(false);
-        Ok(see_other(if is_staff { "/admin" } else { "/" }))
+        let user = auth.authenticate(&form.username, &form.password).await?;
+        let destination = match user.as_ref().map(|u| u.role()) {
+            Some(crate::models::Role::Owner) => "/admin",
+            Some(crate::models::Role::TenantAdmin) => "/portal",
+            _ if user
+                .as_ref()
+                .is_some_and(|u| u.tenant_id.is_some_and(|id| id > 0)) =>
+            {
+                "/media-library"
+            }
+            _ => "/apply/status",
+        };
+        Ok(see_other(destination))
     } else {
         Ok(see_other("/login?error=1"))
     }

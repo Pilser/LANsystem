@@ -1,0 +1,21 @@
+[package]
+name = "onboarding-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Public business application flow: apply, pay, status"
+
+[lib]
+name = "onboarding_app"
+path = "src/lib.rs"
+
+[dependencies]
+topcoat = { workspace = true }
+app-contract = { path = "../../business-apps/app-contract" }
+platform-core = { path = "../../platform/core" }
+platform-auth = { path = "../../platform/auth" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

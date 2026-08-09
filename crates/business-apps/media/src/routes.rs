@@ -110,8 +110,25 @@ async fn media_home(cx: &Cx) -> Result {
 async fn public_directory(cx: &Cx) -> Result {
     let auth = platform_core::auth(cx);
     let tenants = auth.public_tenants().await?;
+    let signed_out = auth.current_user(cx).await?.is_none();
 
     view! {
+        <div class="mb-6 flex items-start justify-between gap-4">
+            <div>
+                <h1 class="text-2xl font-bold">"Public directory"</h1>
+                <p class="mt-1 text-sm text-zinc-400">
+                    "Services running on this LAN."
+                </p>
+            </div>
+            if signed_out {
+                <a
+                    class="rounded-md border border-sky-700 bg-sky-900/40 px-3 py-1.5 text-sm text-sky-200 transition hover:bg-sky-800/40"
+                    href="/apply"
+                >
+                    "Create a business"
+                </a>
+            }
+        </div>
         if tenants.is_empty() {
             <p class="py-10 text-sm text-zinc-400">
                 "Nothing listed yet — tenant admins open their tenant from the Console."
@@ -129,8 +146,20 @@ async fn public_directory(cx: &Cx) -> Result {
                             >
                                 "Open service"
                             </span>
-                            <div class="mt-3 text-lg font-semibold text-zinc-100">
-                                (tenant.tenant_name.as_deref().unwrap_or("—"))
+                            <div class="mt-3 flex flex-wrap items-center gap-2">
+                                <div class="text-lg font-semibold text-zinc-100">
+                                    (tenant.tenant_name.as_deref().unwrap_or("—"))
+                                </div>
+                                if tenant.has_app("media") {
+                                    <span class="rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-xs font-semibold text-emerald-300">
+                                        "Media"
+                                    </span>
+                                }
+                                if tenant.has_app("marketplace") {
+                                    <span class="rounded-full border border-sky-700 bg-sky-900/40 px-2 py-0.5 text-xs font-semibold text-sky-200">
+                                        "Marketplace"
+                                    </span>
+                                }
                             </div>
                             <p class="mt-1 text-sm text-zinc-400">
                                 (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))

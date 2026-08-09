@@ -1,12 +1,13 @@
 use std::time::Duration;
 
 use app_contract::AppRegistry;
+use platform_auth::Role;
 use topcoat::{
     Result,
-    context::{app_context, Cx},
+    context::Cx,
     cookie::RouterBuilderCookieExt,
     htmx::hx_request,
-    router::{BodyLimit, Router, RouterBuilderDiscoverExt, error::{redirect, see_other}, layout, page, request::uri},
+    router::{BodyLimit, Router, RouterBuilderDiscoverExt, error::redirect, layout, page, request::uri},
     session::RouterBuilderSessionExt,
     view::view,
 };
@@ -42,6 +43,7 @@ async fn main() -> Result<()> {
     let mut registry = AppRegistry::new();
     registry.push(media_app::Media);
     registry.push(marketplace_app::Marketplace);
+    registry.push(onboarding_app::Onboarding);
     registry.push(admin_app::Console);
 
     topcoat::start(
@@ -110,9 +112,9 @@ Some(_) if on_console => {
                                 <div class="ml-auto flex items-center gap-4 text-sm">
                                     <a
                                         class="text-sky-400 hover:text-sky-300"
-                                        href="/"
+                                        href="/public"
                                     >
-                                        "← Back to the launcher"
+                                        "← Back to the directory"
                                     </a>
                                     <form method="post" action="/logout">
                                         <button
@@ -128,10 +130,17 @@ Some(_) if on_console => {
                                     "LANsystem"
                                 </a>
                                 <nav class="flex gap-4 text-sm text-zinc-400">
-                                    <a class="hover:text-zinc-100" href="/">"Launcher"</a>
                                     <a class="hover:text-zinc-100" href="/public">"Directory"</a>
                                     <a class="hover:text-zinc-100" href="/media-library">"Media Library"</a>
-                                    <a class="hover:text-zinc-100" href="/admin">"Console"</a>
+                                    match current.as_ref().map(|c| c.user.role()) {
+                                        Some(Role::Owner) => {
+                                            <a class="hover:text-zinc-100" href="/admin">"Console"</a>
+                                        },
+                                        Some(Role::TenantAdmin) => {
+                                            <a class="hover:text-zinc-100" href="/portal">"Portal"</a>
+                                        },
+                                        _ => {},
+                                    }
                                 </nav>
                                 <div class="ml-auto flex items-center gap-3 text-sm">
                                     <span class="hidden text-zinc-400 sm:inline">
@@ -165,35 +174,23 @@ Some(_) if on_console => {
     }
 }
 
+/// `GET /`: no longer a launcher page — signed-out visitors see the public
+/// directory, owners land in the console, tenant admins land in their portal,
+/// members land in their app (or the application status page).
 #[page("/")]
 async fn home(cx: &Cx) -> Result {
-    if platform_core::auth(cx).current_user(cx).await?.is_none() {
+    let Some(current) = platform_core::auth(cx).current_user(cx).await? else {
         return Err(redirect("/public").into());
-    }
-
-    let registry = app_context::<AppRegistry>(cx);
-
-    view! {
-        <h1 class="mb-2 text-3xl font-bold">"Welcome to your LAN"</h1>
-        <p class="mb-6 text-zinc-400">
-            "One place for the apps running on this server."
-        </p>
-        <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
-            for app in registry.all() {
-                <li>
-                    <a
-                        class="block rounded-xl border border-zinc-800 bg-zinc-900 p-5 transition hover:-translate-y-0.5 hover:border-sky-400"
-                        href=(app.home)
-                    >
-                        <div class="text-base font-semibold text-zinc-100">
-                            (app.name)
-                        </div>
-                        <div class="mt-1 text-sm text-zinc-400">
-                            (app.description)
-                        </div>
-                    </a>
-                </li>
+    };
+    match current.user.role() {
+        Role::Owner => Err(redirect("/admin").into()),
+        Role::TenantAdmin => Err(redirect("/portal").into()),
+        Role::Member => {
+            if current.user.tenant_id.is_some_and(|id| id > 0) {
+                Err(redirect("/media-library").into())
+            } else {
+                Err(redirect("/apply/status").into())
             }
-        </ul>
+        }
     }
 }

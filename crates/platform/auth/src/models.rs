@@ -6,6 +6,17 @@ pub const USER_STATUS_ACTIVE: &str = "active";
 pub const USER_STATUS_SUSPENDED: &str = "suspended";
 pub const TENANT_STATUS_ACTIVE: &str = "active";
 pub const TENANT_STATUS_SUSPENDED: &str = "suspended";
+pub const TENANT_STATUS_PENDING: &str = "pending";
+pub const TENANT_STATUS_REJECTED: &str = "rejected";
+/// Onboarding payment gate outcomes.
+pub const PAYMENT_STATUS_NONE: &str = "none";
+pub const PAYMENT_STATUS_PAID: &str = "paid";
+pub const PAYMENT_STATUS_DECLINED: &str = "declined";
+/// The domains a business can apply for (mirrors the app registry in `apps/lan`).
+pub const DOMAINS: &[(&str, &str)] = &[
+    ("media", "Media Library"),
+    ("marketplace", "Marketplace"),
+];
 
 pub const ROLE_OWNER: &str = "owner";
 pub const ROLE_TENANT_ADMIN: &str = "tenant_admin";
@@ -133,6 +144,12 @@ pub struct Tenant {
     /// Tenant tagline shown on directory cards.
     #[serde(default)]
     pub description: Option<String>,
+    /// The applicant user who signed this business up (`pending` tenants only).
+    #[serde(default)]
+    pub applicant_id: Option<i64>,
+    /// Onboarding payment gate: `none`/`paid`/`declined`.
+    #[serde(default)]
+    pub payment_status: Option<String>,
     #[serde(deserialize_with = "datetime::optional")]
     pub created_at: Option<i64>,
 }
@@ -142,12 +159,50 @@ impl Tenant {
         self.status == TENANT_STATUS_ACTIVE
     }
 
+    pub fn is_pending(&self) -> bool {
+        self.status == TENANT_STATUS_PENDING
+    }
+
+    pub fn is_rejected(&self) -> bool {
+        self.status == TENANT_STATUS_REJECTED
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.status == TENANT_STATUS_SUSPENDED
+    }
+
+    /// Whether the onboarding payment gate passed for this application.
+    pub fn is_paid(&self) -> bool {
+        self.payment_status.as_deref() == Some(PAYMENT_STATUS_PAID)
+    }
+
     /// Whether this tenant may use `app_id` (via `appsEnabled`).
     pub fn has_app(&self, app_id: &str) -> bool {
         self.apps_enabled
             .as_deref()
             .is_some_and(|apps| apps.iter().any(|enabled| enabled == app_id))
     }
+}
+
+/// A `Domain` policy node: the owner's per-domain onboarding rules.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DomainPolicy {
+    /// The domain this policy governs (`media`, `marketplace`, …).
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// When true, applying to this domain must clear the payment webhook.
+    #[serde(default)]
+    pub payment_required: Option<bool>,
+    /// The owner's billing webhook; `POST`ed at apply time.
+    #[serde(default)]
+    pub payment_webhook_url: Option<String>,
+}
+
+/// Envelope for `queries::domain_policies`.
+#[derive(Debug, serde::Deserialize)]
+pub struct DomainPolicyRows {
+    pub policies: Vec<DomainPolicy>,
 }
 
 /// One `Session` node row: the persisted token hash + expiry bound to a user.

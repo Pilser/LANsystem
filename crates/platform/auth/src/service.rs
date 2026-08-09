@@ -21,8 +21,9 @@ use crate::authorizer::{
     AccessResult, AuthContext, AuthDecision, Authorizer, WebhookAuthorizer,
 };
 use crate::models::{
-    Role, SessionRecord, SessionRows, Tenant, TenantRows, TenantsRows, User, UserRows, UsersRows,
-    USER_STATUS_ACTIVE,
+    DomainPolicy, DomainPolicyRows, Role, SessionRecord, SessionRows, Tenant, TenantRows,
+    TenantsRows, User, UserRows, UsersRows, PAYMENT_STATUS_DECLINED, PAYMENT_STATUS_PAID,
+    TENANT_STATUS_ACTIVE, TENANT_STATUS_REJECTED, USER_STATUS_ACTIVE,
 };
 use crate::queries;
 
@@ -53,6 +54,15 @@ pub type TenantView = Tenant;
 #[derive(Clone)]
 pub struct Auth {
     db: Db,
+}
+
+/// The onboarding outcome of `Auth::submit_application`.
+#[derive(Debug, Clone)]
+pub struct ApplicationResult {
+    pub tenant_id: i64,
+    /// `None` when the domain needs no payment; otherwise the webhook's
+    /// answer (`true` = paid).
+    pub payment_passed: Option<bool>,
 }
 
 impl Auth {
@@ -325,6 +335,215 @@ impl Auth {
         Ok(())
     }
 
+    /// Whether a business name is already taken (any status).
+    pub async fn tenant_exists(&self, tenant_name: &str) -> Result<bool> {
+        let rows: TenantRows = self
+            .db
+            .query(queries::tenant_by_name(tenant_name.to_string())?)
+            .await?;
+        Ok(rows.tenant.iter().any(|t| t.tenant_name.as_deref() == Some(tenant_name)))
+    }
+
+    /// Whether a username is taken.
+    pub async fn user_exists(&self, username: &str) -> Result<bool> {
+        let rows: UserRows = self
+            .db
+            .query(queries::user_by_username(username.to_string())?)
+            .await?;
+        Ok(rows.user.iter().any(|u| u.username.as_deref() == Some(username)))
+    }
+
+    /// Public application: create the applicant's account (member, no tenant)
+    /// and a `pending` tenant for the business. The payment gate runs if the
+    /// domain policy demands it — approval stays with the owner afterwards.
+    pub async fn submit_application(
+        &self,
+        business_name: String,
+        domain: String,
+        username: String,
+        display_name: String,
+        password: String,
+    ) -> Result<ApplicationResult> {
+        if !crate::models::DOMAINS.iter().any(|(value, _)| *value == domain) {
+            return Err(std::io::Error::other("unknown domain, pick one from the list").into());
+        }
+
+        let user_id = crate::ids::next();
+        let hash = self.hash_password(&password)?;
+        let _: serde_json::Value = self
+            .db
+            .query(queries::upsert_user(
+                user_id,
+                username,
+                display_name,
+                hash,
+                Role::Member.as_str().to_string(),
+                USER_STATUS_ACTIVE.to_string(),
+                NO_TENANT,
+            )?)
+            .await?;
+
+        let tenant_id = crate::ids::next();
+        let _: serde_json::Value = self
+            .db
+            .query(queries::create_application(
+                tenant_id,
+                business_name.clone(),
+                vec![domain.clone()],
+                user_id,
+            )?)
+            .await?;
+
+        let payment_passed = self.run_payment_gate(tenant_id).await?;
+        Ok(ApplicationResult {
+            tenant_id,
+            payment_passed,
+        })
+    }
+
+    /// Consult the domain's policy; when payment is required, call the
+    /// owner's billing webhook and record the outcome. Returns the webhook's
+    /// answer (`None` when no payment is required).
+    pub async fn run_payment_gate(&self, tenant_id: i64) -> Result<Option<bool>> {
+        let tenant = self
+            .tenant_by_id(tenant_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("tenant not found"))?;
+        let Some(domain) = tenant
+            .apps_enabled
+            .as_deref()
+            .and_then(|apps| apps.first().map(String::as_str))
+            .map(str::to_owned)
+        else {
+            return Ok(None);
+        };
+        let policies = self.domain_policies().await?;
+        let Some(policy) = policies.iter().find(|p| p.domain.as_deref() == Some(domain.as_str())) else {
+            return Ok(None);
+        };
+        if policy.payment_required != Some(true) {
+            return Ok(None);
+        }
+        let Some(webhook_url) = policy.payment_webhook_url.clone().filter(|u| !u.is_empty()) else {
+            return Ok(None);
+        };
+
+        let paid = call_payment_webhook(&webhook_url, &domain, &tenant).await;
+        let status = if paid { PAYMENT_STATUS_PAID } else { PAYMENT_STATUS_DECLINED };
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_tenant_payment(tenant_id, status.to_string())?)
+            .await?;
+        Ok(Some(paid))
+    }
+
+    /// Approve an application: activate the tenant with the given quota and
+    /// promote the applicant to `tenant_admin`.
+    pub async fn approve_application(
+        &self,
+        tenant_id: i64,
+        quota_bytes: i64,
+    ) -> Result<()> {
+        let tenant = self
+            .tenant_by_id(tenant_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("application not found"))?;
+        let Some(applicant_id) = tenant.applicant_id else {
+            return Err(std::io::Error::other("application has no applicant").into());
+        };
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_tenant_status(tenant_id, TENANT_STATUS_ACTIVE.to_string())?)
+            .await?;
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_tenant_storage(tenant_id, quota_bytes, 0)?)
+            .await?;
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_user_profile(
+                applicant_id,
+                tenant.tenant_name.as_deref().unwrap_or("").to_string(),
+                Role::TenantAdmin.as_str().to_string(),
+                USER_STATUS_ACTIVE.to_string(),
+                tenant_id,
+            )?)
+            .await?;
+        tracing::info!(tenant_id, applicant_id, "onboarding: application approved");
+        Ok(())
+    }
+
+    /// Reject an application; the applicant keeps the account and sees the
+    /// rejection on their status page.
+    pub async fn reject_application(&self, tenant_id: i64) -> Result<()> {
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_tenant_status(tenant_id, TENANT_STATUS_REJECTED.to_string())?)
+            .await?;
+        Ok(())
+    }
+
+    /// The application tied to an applicant account (`None` before applying).
+    pub async fn application_for(&self, applicant_id: i64) -> Result<Option<Tenant>> {
+        let rows: TenantRows = self
+            .db
+            .query(queries::tenant_by_applicant(applicant_id)?)
+            .await?;
+        Ok(rows.tenant.into_iter().next())
+    }
+
+    /// All domain onboarding policies (owner console + payment gate).
+    pub async fn domain_policies(&self) -> Result<Vec<DomainPolicy>> {
+        let rows: DomainPolicyRows = self.db.query(queries::domain_policies()?).await?;
+        Ok(rows.policies)
+    }
+
+    /// Set a domain policy: whether applying to that domain must clear the
+    /// payment webhook first, and which webhook answers.
+    pub async fn save_domain_policy(
+        &self,
+        domain: String,
+        payment_required: bool,
+        webhook_url: String,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .db
+            .query(queries::upsert_domain_policy(domain, payment_required, webhook_url)?)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_tenant_apps(&self, tenant_id: i64, apps: Vec<String>) -> Result<()> {
+        let _: serde_json::Value = self.db.query(queries::set_tenant_apps(tenant_id, apps)?).await?;
+        Ok(())
+    }
+
+    pub async fn set_tenant_storage(
+        &self,
+        tenant_id: i64,
+        quota_bytes: i64,
+        used_bytes: i64,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_tenant_storage(tenant_id, quota_bytes, used_bytes)?)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_tenant_billing(
+        &self,
+        tenant_id: i64,
+        billing_enabled: bool,
+        webhook_url: String,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_tenant_billing(tenant_id, billing_enabled, webhook_url)?)
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_tenant_active(&self, tenant_id: i64, active: bool) -> Result<()> {
         let status = if active { "active" } else { "suspended" };
         let _: serde_json::Value = self
@@ -494,4 +713,31 @@ fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(0))
+}
+
+/// Call the domain's onboarding payment webhook once at application time:
+/// never fails hard — any failure counts as "not paid". The webhook
+/// answers `{"paid": true|false}`.
+async fn call_payment_webhook(webhook_url: &str, domain: &str, tenant: &Tenant) -> bool {
+    let payload = serde_json::json!({
+        "event": "application",
+        "domain": domain,
+        "business": tenant.tenant_name.as_deref().unwrap_or(""),
+        "tenantId": tenant.tenant_id,
+    });
+    let client = reqwest::Client::new();
+    let response = match client.post(webhook_url).json(&payload).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%domain, %error, "onboarding: payment webhook unreachable");
+            return false;
+        }
+    };
+    match response.json::<serde_json::Value>().await {
+        Ok(body) => body.get("paid").and_then(|v| v.as_bool()).unwrap_or(false),
+        Err(error) => {
+            tracing::warn!(%domain, %error, "onboarding: payment webhook answered without \"paid\"");
+            false
+        }
+    }
 }

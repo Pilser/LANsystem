@@ -12,6 +12,7 @@ pub mod labels {
     pub const MESSAGE: &str = "Message";
     pub const PRODUCT: &str = "Product";
     pub const MARKETPLACE_ORDER: &str = "MarketplaceOrder";
+    pub const DOMAIN_POLICY: &str = "Domain";
 }
 
 pub mod edges {
@@ -71,6 +72,15 @@ pub mod props {
     pub const PRODUCT_IMAGE_KEY: &str = "productImageKey";
     pub const STOCK: &str = "stock";
     pub const QUANTITY: &str = "quantity";
+    /// Onboarding: the applicant who signed the business up (a `User` id).
+    pub const APPLICANT_ID: &str = "applicantId";
+    /// Onboarding payment gate: `none` / `paid` / `declined`.
+    pub const PAYMENT_STATUS: &str = "paymentStatus";
+    /// Domain policy: the domain name this policy governs (`media`, …).
+    pub const DOMAIN: &str = "domain";
+    pub const PAYMENT_REQUIRED: &str = "paymentRequired";
+    /// Domain policy: the owner's billing webhook called at apply time.
+    pub const PAYMENT_WEBHOOK_URL: &str = "paymentWebhookUrl";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +96,7 @@ pub enum NodeLabel {
     Message,
     Product,
     MarketplaceOrder,
+    DomainPolicy,
     /// A label returned by the database that is not part of the shared glossary.
     Unknown,
 }
@@ -104,6 +115,7 @@ impl NodeLabel {
             Self::Message => labels::MESSAGE,
             Self::Product => labels::PRODUCT,
             Self::MarketplaceOrder => labels::MARKETPLACE_ORDER,
+            Self::DomainPolicy => labels::DOMAIN_POLICY,
             Self::Unknown => "Unknown",
         }
     }
@@ -123,6 +135,7 @@ impl From<&str> for NodeLabel {
             labels::MESSAGE => Self::Message,
             labels::PRODUCT => Self::Product,
             labels::MARKETPLACE_ORDER => Self::MarketplaceOrder,
+            labels::DOMAIN_POLICY => Self::DomainPolicy,
             _ => Self::Unknown,
         }
     }

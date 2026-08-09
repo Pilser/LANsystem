@@ -16,6 +16,7 @@ pub mod service;
 
 pub use authorizer::{Authorizer, WebhookAuthorizer};
 pub use models::{
-    Role, SessionRecord, Tenant, User, USER_STATUS_ACTIVE, USER_STATUS_SUSPENDED,
+    DomainPolicy, Role, SessionRecord, Tenant, User, USER_STATUS_ACTIVE, USER_STATUS_SUSPENDED,
+    DOMAINS, TENANT_STATUS_PENDING, TENANT_STATUS_REJECTED,
 };
 pub use service::{Auth, CurrentUser, TenantView, UserView};

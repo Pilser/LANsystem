@@ -50,6 +50,21 @@ Env the app needs: `HELIX_ENDPOINT=http://helix-LANsystem-LANsystem:8080`,
 - No `helix compile`/`helix check`. Queries are validated by the running instance:
   `helix query LANsystem -e '…'` or `--file examples/request.json`
   (JSON body in `examples/request.json` is v1-style — for v2 use `query.read.entries`).
+- **The v2 write/read AST has no delete mutation — data is append-only.** The only
+  clean wipe is `helix stop LANsystem` → disconnect anything off the helix network
+  (`docker network disconnect helix-LANsystem-LANsystem-net <name>`) →
+  `helix prune LANsystem` → `helix start LANsystem`. `billing-hook` (and the app
+  container) pin the network, so prune fails silently partway and leaves the data
+  volume if you skip the disconnect. After prune, `docker compose down` before
+  `up -d` (compose caches the old network ID); re-attach `billing-hook`.
+- Ad-hoc graph reads: `POST :6969/v2/query` with envelope
+  `{"request_type":"read","query_name":null,"query":{"read":{"entries":[
+  {"query":{"name":"t","root":{"project":{"input":{"nodes":{"reference":"all"}},
+  "projections":[{"property":{"source":"tenantId","alias":"tenantId"}}]}}}]},
+  "returns":["t"]}},"parameters":{}}`.
+- Known gotcha: `NO_TENANT = 0` is stored as real `Some(0)` — always test
+  `tenant_id.is_some_and(|id| id > 0)`, not `is_some()`, when deciding whether a
+  user belongs to a tenant (login redirects, `/apply/*` guards).
 
 ## Git hygiene
 
