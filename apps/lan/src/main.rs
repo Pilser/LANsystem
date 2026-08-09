@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
 
     let mut registry = AppRegistry::new();
     registry.push(media_app::Media);
+    registry.push(marketplace_app::Marketplace);
     registry.push(admin_app::Console);
 
     topcoat::start(
@@ -56,6 +57,7 @@ async fn main() -> Result<()> {
                     .build(),
             )
             .layer(BodyLimit::max(8 * 1024 * 1024 * 1024).at("/media-library/upload"))
+            .layer(BodyLimit::max(64 * 1024 * 1024).at("/shop-manage"))
             .build(),
     )
     .await?;

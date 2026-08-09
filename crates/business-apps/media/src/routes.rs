@@ -176,6 +176,14 @@ async fn tenant_space(cx: &Cx) -> Result {
         <p class="mb-6 text-sm text-zinc-400">
             (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))
         </p>
+        if tenant.has_app("marketplace") {
+            <a
+                class="mb-6 inline-block rounded-md border border-sky-700 bg-sky-900/40 px-3 py-1.5 text-sm text-sky-200 transition hover:bg-sky-800/40"
+                href=("/shop/".to_owned() + &tenant_id.to_string())
+            >
+                "Open the shop"
+            </a>
+        }
         if library.items.is_empty() {
             <p class="py-10 text-sm text-zinc-400">
                 "Nothing open to guests yet."

@@ -15,6 +15,7 @@ platform-core = { path = "../../crates/platform/core" }
 platform-auth = { path = "../../crates/platform/auth" }
 app-contract = { path = "../../crates/business-apps/app-contract" }
 media-app = { path = "../../crates/business-apps/media" }
+marketplace-app = { path = "../../crates/business-apps/marketplace" }
 admin-app = { path = "../../crates/business-apps/admin" }
 tokio = { workspace = true }
 tracing = { workspace = true }

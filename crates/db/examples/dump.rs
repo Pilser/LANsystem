@@ -35,7 +35,31 @@ async fn main() -> Result<(), db::Error> {
                 PropertyProjection::new(props::DELETED_AT),
             ]),
         )
-        .returning(["tenants", "users", "items"]);
+        .var_as(
+            "products",
+            g().n_with_label(labels::PRODUCT).project(vec![
+                PropertyProjection::new(props::PRODUCT_ID),
+                PropertyProjection::new(props::TITLE),
+                PropertyProjection::new(props::PRICE),
+                PropertyProjection::new(props::STOCK),
+                PropertyProjection::new(props::TENANT_ID),
+                PropertyProjection::new(props::IS_PUBLIC),
+                PropertyProjection::new(props::DELETED_AT),
+            ]),
+        )
+        .var_as(
+            "orders",
+            g().n_with_label(labels::MARKETPLACE_ORDER).project(vec![
+                PropertyProjection::new(props::ORDER_ID),
+                PropertyProjection::new(props::PRODUCT_ID),
+                PropertyProjection::new(props::TENANT_ID),
+                PropertyProjection::new(props::USER_ID),
+                PropertyProjection::new(props::QUANTITY),
+                PropertyProjection::new(props::STATUS),
+                PropertyProjection::new(props::CREATED_AT),
+            ]),
+        )
+        .returning(["tenants", "users", "items", "products", "orders"]);
     let request = QueryRequest::read(q);
     println!("--- REQUEST ---\n{}", request.to_json_string()?);
 

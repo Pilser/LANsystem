@@ -1,0 +1,22 @@
+[package]
+name = "marketplace-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+db = { path = "../../db" }
+helix-db = { workspace = true }
+storage = { path = "../../storage" }
+platform-core = { path = "../../platform/core" }
+platform-auth = { path = "../../platform/auth" }
+app-contract = { path = "../app-contract" }
+topcoat = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

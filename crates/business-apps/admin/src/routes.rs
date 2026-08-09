@@ -61,8 +61,12 @@ pub struct SaveTenantForm {
     pub tenant_id: Option<String>,
     pub tenant_name: String,
     pub storage_quota_gib: i64,
-    #[serde(default, deserialize_with = "deserialize_apps")]
-    pub apps_enabled: Vec<String>,
+    /// One checkbox per app. Distinct field names: the form codec rejects
+    /// repeated keys, so the apps to enable are literals instead.
+    #[serde(default)]
+    pub app_media: Option<String>,
+    #[serde(default)]
+    pub app_marketplace: Option<String>,
     #[serde(default)]
     pub billing_enabled: Option<String>,
     #[serde(default)]
@@ -168,9 +172,14 @@ async fn console(cx: &Cx) -> Result {
                                             class="w-24 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-400" />
                                     </label>
                                     <label class="flex h-8 items-center gap-2 text-xs text-zinc-300">
-                                        <input type="checkbox" name="apps_enabled" value="media" checked=(tenant.has_app("media"))
+                                        <input type="checkbox" name="app_media" value="media" checked=(tenant.has_app("media"))
                                             class="h-4 w-4 accent-sky-500" />
                                         "Media Library"
+                                    </label>
+                                    <label class="flex h-8 items-center gap-2 text-xs text-zinc-300">
+                                        <input type="checkbox" name="app_marketplace" value="marketplace" checked=(tenant.has_app("marketplace"))
+                                            class="h-4 w-4 accent-sky-500" />
+                                        "Marketplace"
                                     </label>
                                     <label class="flex h-8 items-center gap-2 text-xs text-zinc-300">
                                         <input type="checkbox" name="billing_enabled" value="on" checked=(tenant.billing_enabled == Some(true))
@@ -221,9 +230,14 @@ async fn console(cx: &Cx) -> Result {
                                 class="w-28 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
                         </label>
                         <label class="flex h-9 items-center gap-2 text-sm">
-                            <input type="checkbox" name="apps_enabled" value="media"
+                            <input type="checkbox" name="app_media" value="media"
                                 class="h-4 w-4 accent-sky-500" />
                             "Media Library"
+                        </label>
+                        <label class="flex h-9 items-center gap-2 text-sm">
+                            <input type="checkbox" name="app_marketplace" value="marketplace"
+                                class="h-4 w-4 accent-sky-500" />
+                            "Marketplace"
                         </label>
                         <label class="flex h-9 items-center gap-2 text-sm">
                             <input type="checkbox" name="billing_enabled" value="on"
@@ -451,11 +465,18 @@ pub async fn tenants_save(Form(form): Form<SaveTenantForm>, cx: &Cx) -> Result<S
     }
     let quota = form.storage_quota_gib.saturating_mul(1 << 30);
     let tenant_id = optional_i64(form.tenant_id);
+    let mut apps_enabled = Vec::new();
+    if form.app_media.is_some() {
+        apps_enabled.push("media".to_string());
+    }
+    if form.app_marketplace.is_some() {
+        apps_enabled.push("marketplace".to_string());
+    }
     auth.save_tenant(
         tenant_id,
         form.tenant_name.clone(),
         quota,
-        form.apps_enabled.clone(),
+        apps_enabled,
         form.billing_enabled.is_some(),
         form.auth_webhook_url.clone(),
     )
@@ -517,27 +538,6 @@ const ROLE_OPTIONS: &[(&str, &str)] = &[
     ("tenant_admin", "Tenant admin"),
     ("member", "Member"),
 ];
-
-/// Form codecs give a single value for one checkbox and a sequence for
-/// several; accept both.
-fn deserialize_apps<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany {
-        One(String),
-        Many(Vec<String>),
-    }
-
-    Ok(match OneOrMany::deserialize(deserializer)? {
-        OneOrMany::One(value) => vec![value],
-        OneOrMany::Many(values) => values,
-    })
-}
 
 /// Parse an optional id from a form string (`""` or `None` → `None`).
 fn optional_i64(raw: Option<String>) -> Option<i64> {

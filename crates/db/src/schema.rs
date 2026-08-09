@@ -10,6 +10,8 @@ pub mod labels {
     pub const LISTING_REVIEW: &str = "ListingReview";
     pub const ARTICLE: &str = "Article";
     pub const MESSAGE: &str = "Message";
+    pub const PRODUCT: &str = "Product";
+    pub const MARKETPLACE_ORDER: &str = "MarketplaceOrder";
 }
 
 pub mod edges {
@@ -64,6 +66,11 @@ pub mod props {
     pub const MEDIA_ITEM_ID: &str = "mediaItemId";
     pub const ARTICLE_ID: &str = "articleId";
     pub const MESSAGE_ID: &str = "messageId";
+    pub const PRODUCT_ID: &str = "productId";
+    pub const ORDER_ID: &str = "orderId";
+    pub const PRODUCT_IMAGE_KEY: &str = "productImageKey";
+    pub const STOCK: &str = "stock";
+    pub const QUANTITY: &str = "quantity";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,6 +84,8 @@ pub enum NodeLabel {
     ListingReview,
     Article,
     Message,
+    Product,
+    MarketplaceOrder,
     /// A label returned by the database that is not part of the shared glossary.
     Unknown,
 }
@@ -93,6 +102,8 @@ impl NodeLabel {
             Self::ListingReview => labels::LISTING_REVIEW,
             Self::Article => labels::ARTICLE,
             Self::Message => labels::MESSAGE,
+            Self::Product => labels::PRODUCT,
+            Self::MarketplaceOrder => labels::MARKETPLACE_ORDER,
             Self::Unknown => "Unknown",
         }
     }
@@ -110,6 +121,8 @@ impl From<&str> for NodeLabel {
             labels::LISTING_REVIEW => Self::ListingReview,
             labels::ARTICLE => Self::Article,
             labels::MESSAGE => Self::Message,
+            labels::PRODUCT => Self::Product,
+            labels::MARKETPLACE_ORDER => Self::MarketplaceOrder,
             _ => Self::Unknown,
         }
     }
@@ -203,6 +216,11 @@ pub enum Property {
     MediaItemId,
     ArticleId,
     MessageId,
+    ProductId,
+    OrderId,
+    ProductImageKey,
+    Stock,
+    Quantity,
     /// A property present in the database that is not part of the shared glossary.
     Unknown,
 }
@@ -247,6 +265,11 @@ impl Property {
             Self::MediaItemId => props::MEDIA_ITEM_ID,
             Self::ArticleId => props::ARTICLE_ID,
             Self::MessageId => props::MESSAGE_ID,
+            Self::ProductId => props::PRODUCT_ID,
+            Self::OrderId => props::ORDER_ID,
+            Self::ProductImageKey => props::PRODUCT_IMAGE_KEY,
+            Self::Stock => props::STOCK,
+            Self::Quantity => props::QUANTITY,
             Self::Unknown => "Unknown",
         }
     }
@@ -292,6 +315,11 @@ impl From<&str> for Property {
             props::MEDIA_ITEM_ID => Self::MediaItemId,
             props::ARTICLE_ID => Self::ArticleId,
             props::MESSAGE_ID => Self::MessageId,
+            props::PRODUCT_ID => Self::ProductId,
+            props::ORDER_ID => Self::OrderId,
+            props::PRODUCT_IMAGE_KEY => Self::ProductImageKey,
+            props::STOCK => Self::Stock,
+            props::QUANTITY => Self::Quantity,
             _ => Self::Unknown,
         }
     }
