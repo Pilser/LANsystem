@@ -13,6 +13,7 @@ use topcoat::{
     router::content::multipart::Multipart,
     router::content::Form,
     router::error::{RouterErrorExt, SeeOther, redirect, see_other},
+    router::response::IntoResponse,
     router::{page, parse_query_params, path_param, route},
     view::view,
 };
@@ -28,11 +29,44 @@ path_param!(product_id);
 /// The `orderId` segment captured by the order-status route.
 path_param!(order_id);
 
+/// The base64url-encoded object key captured by `/blob/{encoded}`.
+path_param!(blob);
+
 /// A `tenantId` of 0 means "platform-level" (the owner has no tenant).
 const NO_TENANT: i64 = 0;
 
 /// Display currency for prices stored in minor units.
 const CURRENCY: &str = "UGX";
+
+/// `GET /blob/{encoded}`: stream one stored object back through the app.
+/// Browsers cannot resolve the MinIO container hostname from presigned URLs,
+/// so every image/video/media link in the UI goes through this proxy
+/// (base64url key — object keys contain `/`, which route params cannot hold).
+#[route(GET "/blob/{blob}")]
+async fn blob(cx: &Cx) -> Result<topcoat::router::response::Response> {
+    let encoded: &str = path_param::<Blob>(cx);
+    let storage = platform_core::storage(cx);
+    let key = platform_core::decode_key(encoded)
+        .filter(|key| key.starts_with("shop/") || key.starts_with("media/"))
+        .ok_or_else(|| topcoat::Error::from(redirect("/public")))?;
+    let Some(bytes) = storage.get_bytes(&key).await? else {
+        return Err(topcoat::Error::from(redirect("/public")));
+    };
+    let content_type = match key.split('.').next_back() {
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("mp4") => "video/mp4",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        _ => "application/octet-stream",
+    };
+    ((
+        [("content-type", content_type), ("cache-control", "public, max-age=3600")],
+        bytes,
+    )
+        .into_response(cx))
+}
 
 #[derive(Deserialize)]
 struct ShopQuery {
@@ -50,7 +84,7 @@ async fn shop(cx: &Cx) -> Result {
 
     let auth = platform_core::auth(cx);
     let db = platform_core::db(cx);
-    let storage = platform_core::storage(cx);
+    let current = auth.current_user(cx).await?;
 
     let Some(tenant) = auth.tenant_by_id(tenant_id).await? else {
         return Err(redirect("/public").into());
@@ -58,6 +92,11 @@ async fn shop(cx: &Cx) -> Result {
     if !tenant.is_public.unwrap_or(false) {
         return Err(redirect("/public").into());
     }
+    let staff = current.as_ref().is_some_and(|c| {
+        c.user.role() == platform_core::Role::Owner
+            || (c.user.role().is_at_least(platform_core::Role::TenantAdmin)
+                && c.user.tenant_id == Some(tenant_id))
+    });
 
     let catalog: models::ProductPage = db.query(models::shop_products_by_tenant(tenant_id)?).await?;
     let ordered = parse_query_params::<ShopQuery>(cx)
@@ -78,6 +117,12 @@ async fn shop(cx: &Cx) -> Result {
             <span class="rounded-full border border-sky-700 bg-sky-900/40 px-2 py-0.5 text-xs text-sky-200">
                 "Shop"
             </span>
+            if staff {
+                <a class="ml-auto rounded-md border border-zinc-700 px-3 py-1 text-xs text-zinc-300 transition hover:border-sky-500"
+                    href=("/shop-manage/".to_owned() + &tenant_id.to_string())>
+                    "Manage shop"
+                </a>
+            }
         </div>
         if ordered {
             <p class="mb-4 rounded-md border border-emerald-900 bg-emerald-950/60 px-3 py-2 text-sm text-emerald-300">
@@ -94,19 +139,32 @@ async fn shop(cx: &Cx) -> Result {
                     <li class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
                         match product.product_image_key.as_deref() {
                             Some(key) => {
-                                let url = storage.presign_get(key, 900).await.ok();
-                                match url {
-                                    Some(src) => {
-                                        <img
-                                            class="aspect-video w-full bg-zinc-800 object-cover"
-                                            src=(src)
-                                            alt=(product.title.clone().unwrap_or_default())
-                                        />
-                                    },
-                                    None => { <div class="aspect-video w-full bg-zinc-800" /> },
-                                }
+                                <img
+                                    class="aspect-video w-full bg-zinc-800 object-cover"
+                                    src=("/blob/".to_owned() + &platform_core::encode_key(key))
+                                    alt=(product.title.clone().unwrap_or_default())
+                                />
                             },
                             None => { <div class="aspect-video w-full bg-zinc-800" /> },
+                        }
+                        let gallery: Vec<String> = product
+                            .gallery_keys
+                            .as_deref()
+                            .and_then(|json| serde_json::from_str(json).ok())
+                            .unwrap_or_default();
+                        if gallery.len() > 1 {
+                            <div class="flex gap-1 px-4 pt-3">
+                                for key in gallery.iter().skip(1).take(8) {
+                                    <img class="h-10 w-10 rounded border border-zinc-800 bg-zinc-800 object-cover"
+                                        src=("/blob/".to_owned() + &platform_core::encode_key(key))
+                                        alt="" loading="lazy" />
+                                }
+                                if gallery.len() > 9 {
+                                    <span class="flex h-10 w-10 items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-xs text-zinc-400">
+                                        "+9"
+                                    </span>
+                                }
+                            </div>
                         }
                         <div class="p-4">
                             <div class="flex items-center justify-between gap-2">
@@ -251,7 +309,6 @@ async fn shop_manage(cx: &Cx) -> Result {
     let auth = platform_core::auth(cx);
     let current = auth.current_user(cx).await?.ok_or_redirect("/login")?;
     let db = platform_core::db(cx);
-    let storage = platform_core::storage(cx);
 
     let raw: &str = path_param::<TenantId>(cx);
     let Ok(tenant_id) = raw.parse::<i64>() else {
@@ -295,15 +352,25 @@ async fn shop_manage(cx: &Cx) -> Result {
                 <li class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
                     match product.product_image_key.as_deref() {
                         Some(key) => {
-                            let url = storage.presign_get(key, 900).await.ok();
-                            match url {
-                                Some(src) => {
-                                    <img class="aspect-video w-full bg-zinc-800 object-cover" src=(src) alt=(product.title.clone().unwrap_or_default()) />
-                                },
-                                None => { <div class="aspect-video w-full bg-zinc-800" /> },
-                            }
+                            <img class="aspect-video w-full bg-zinc-800 object-cover"
+                                src=("/blob/".to_owned() + &platform_core::encode_key(key))
+                                alt=(product.title.clone().unwrap_or_default()) />
                         },
                         None => { <div class="aspect-video w-full bg-zinc-800" /> },
+                    }
+                    let gallery: Vec<String> = product
+                        .gallery_keys
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str(json).ok())
+                        .unwrap_or_default();
+                    if !gallery.is_empty() {
+                        <div class="flex gap-1 px-4 pt-3">
+                            for key in gallery.iter().skip(1).take(8) {
+                                <img class="h-10 w-10 rounded border border-zinc-800 bg-zinc-800 object-cover"
+                                    src=("/blob/".to_owned() + &platform_core::encode_key(key))
+                                    alt="" loading="lazy" />
+                            }
+                        </div>
                     }
                     <div class="p-4">
                         <div class="flex items-center justify-between gap-2">
@@ -322,6 +389,18 @@ async fn shop_manage(cx: &Cx) -> Result {
                         </p>
                         <form
                             class="mt-3 flex items-center gap-2"
+                            method="post"
+                            action=("/shop/product/".to_owned() + &product.product_id.clone().unwrap_or_default() + "/photos")
+                            enctype="multipart/form-data"
+                        >
+                            <input name="photo" type="file" accept="image/*" multiple=""
+                                class="text-xs text-zinc-400" />
+                            <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-sky-500" type="submit">
+                                "Add photos"
+                            </button>
+                        </form>
+                        <form
+                            class="mt-2 flex items-center gap-2"
                             method="post"
                             action=("/shop/product/".to_owned() + &product.product_id.clone().unwrap_or_default() + "/visibility")
                         >
@@ -368,8 +447,8 @@ async fn shop_manage(cx: &Cx) -> Result {
                 <input name="stock" type="number" min="0" value="0" class="w-20 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
             </label>
             <label class="flex flex-col gap-1 text-sm">
-                "Photo"
-                <input name="photo" type="file" accept="image/*" class="text-sm text-zinc-400" />
+                "Photos (first is the cover)"
+                <input name="photo" type="file" accept="image/*" multiple="" class="text-sm text-zinc-400" />
             </label>
             <button class="cursor-pointer rounded-md bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-500">
                 "Add"
@@ -455,8 +534,7 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
     let mut description = String::new();
     let mut price_ugx = String::new();
     let mut stock = 0i64;
-    let mut file_name: Option<String> = None;
-    let mut file_bytes: Option<Bytes> = None;
+    let mut photos: Vec<(String, Bytes)> = Vec::new();
     while let Some(field) = upload.next_field().await? {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
@@ -465,8 +543,11 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
             "price_ugx" => price_ugx = field.text().await?.trim().to_string(),
             "stock" => stock = field.text().await?.trim().parse().unwrap_or(0),
             "photo" => {
-                file_name = field.file_name().map(str::to_owned);
-                file_bytes = Some(field.bytes().await?);
+                let file_name = field.file_name().map(str::to_owned).unwrap_or_default();
+                let bytes = field.bytes().await?;
+                if !bytes.is_empty() {
+                    photos.push((file_name, bytes));
+                }
             }
             _ => {}
         }
@@ -478,16 +559,20 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
     // Prices are entered in UGX shillings and stored as-is (minor units).
     let price = price_ugx.parse::<i64>().unwrap_or(0);
 
-    // One id for the whole product: the photo key and the node share it.
+    // One id for the whole product: the photo keys and the node share it.
     let id = next_product_id();
 
-    // Upload the photo, if any, under the shop key scheme.
-    let mut image_key = String::new();
-    if let Some(bytes) = file_bytes.filter(|b| !b.is_empty()) {
-        let key = format!("shop/{tenant_id}/{id}/photo");
-        storage.put(&key, bytes, "image/jpeg").await?;
-        image_key = key;
+    // Upload every photo under the shop key scheme; the first becomes the
+    // cover, the rest land in the gallery (JSON array of keys).
+    let mut image_keys: Vec<String> = Vec::new();
+    for (index, (file_name, bytes)) in photos.into_iter().enumerate() {
+        let ext = image_extension(&file_name);
+        let key = format!("shop/{tenant_id}/{id}/photo-{index}.{ext}");
+        storage.put(&key, bytes, infer_image_content_type(&file_name)).await?;
+        image_keys.push(key);
     }
+    let image_key = image_keys.first().cloned().unwrap_or_default();
+    let gallery_json = serde_json::to_string(&image_keys).unwrap_or_else(|_| "[]".to_string());
 
     let _: serde_json::Value = db
         .query(models::create_product(
@@ -497,12 +582,105 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
             price,
             CURRENCY.to_string(),
             image_key,
+            gallery_json,
             stock,
             tenant_id,
         )?)
         .await?;
 
     Ok(see_other(&format!("/shop-manage/{tenant_id}")))
+}
+
+/// `POST /shop/product/{product_id}/photos`: append more photos to a
+/// product's gallery (multipart `photo` fields, any number).
+#[route(POST "/shop/product/{product_id}/photos")]
+async fn add_product_photos(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
+    let auth = platform_core::auth(cx);
+    let current = auth.current_user(cx).await?.ok_or_redirect("/login")?;
+    let db = platform_core::db(cx);
+    let storage = platform_core::storage(cx);
+
+    let raw: &str = path_param::<ProductId>(cx);
+    let catalog: models::ProductPage = db.query(models::product_by_id(raw.to_string())?).await?;
+    let Some(product) = catalog.items.into_iter().next() else {
+        return Ok(see_other("/admin"));
+    };
+    let tenant_id = product.tenant_id.unwrap_or(NO_TENANT);
+    let is_owner = current.user.role() == platform_core::Role::Owner;
+    let is_own_admin = current
+        .user
+        .role()
+        .is_at_least(platform_core::Role::TenantAdmin)
+        && current.user.tenant_id == Some(tenant_id)
+        && tenant_id != NO_TENANT;
+    if !is_owner && !is_own_admin {
+        return Ok(see_other("/admin"));
+    }
+
+    let mut photos: Vec<(String, Bytes)> = Vec::new();
+    while let Some(field) = upload.next_field().await? {
+        let name = field.name().unwrap_or_default().to_string();
+        if name == "photo" {
+            let file_name = field.file_name().map(str::to_owned).unwrap_or_default();
+            let bytes = field.bytes().await?;
+            if !bytes.is_empty() {
+                photos.push((file_name, bytes));
+            }
+        }
+    }
+
+    let mut existing: Vec<String> = product
+        .gallery_keys
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    for (file_name, bytes) in photos {
+        let ext = image_extension(&file_name);
+        let key = format!("shop/{tenant_id}/{raw}/photo-{}.{ext}", existing.len());
+        storage.put(&key, bytes, infer_image_content_type(&file_name)).await?;
+        existing.push(key);
+    }
+    let _: serde_json::Value = db
+        .query(models::add_product_gallery(
+            raw.to_string(),
+            serde_json::to_string(&existing).unwrap_or_else(|_| "[]".to_string()),
+        )?)
+        .await?;
+    Ok(see_other(&format!("/shop-manage/{tenant_id}")))
+}
+
+/// The file extension to bake into a photo key so the `/blob` proxy can serve
+/// a correct content type (`image/jpeg` fallback for unknown sources).
+fn image_extension(file_name: &str) -> &'static str {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "png"
+    } else if lower.ends_with(".gif") {
+        "gif"
+    } else if lower.ends_with(".webp") {
+        "webp"
+    } else if lower.ends_with(".svg") {
+        "svg"
+    } else {
+        "jpg"
+    }
+}
+
+/// Sniff a content type for an uploaded photo by extension; defaults to
+/// `image/jpeg` like the pre-gallery behaviour.
+fn infer_image_content_type(file_name: &str) -> &'static str {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "image/jpeg"
+    }
 }
 
 /// `POST /shop/product/{product_id}/visibility`: publish / unpublish.

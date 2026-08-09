@@ -546,6 +546,7 @@ async fn run(cx: &Cx, scope: &Scope, action: &str, params: &Value) -> Result<Val
                 price,
                 "UGX".to_string(),
                 String::new(),
+                "[]".to_string(),
                 stock,
                 tenant_id,
             )?).await?;

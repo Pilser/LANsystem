@@ -45,17 +45,23 @@ async fn media_home(cx: &Cx) -> Result {
     let db = platform_core::db(cx);
 
     // Billing seam: the tenant's webhook (when billing is enabled) can deny
-    // the library outright.
-    let decision = auth
-        .authorize_access(
-            &current.user,
-            current.tenant.as_ref(),
-            "media",
-            "library".to_string(),
-        )
-        .await?;
-    if decision == platform_core::AuthDecision::Deny {
-        return view! { <div> components::access_denied() </div> };
+    // the library outright. Tenant staff (the tenant's own admin, or the
+    // owner) always manage their own library — the webhook gates customers,
+    // not the business.
+    let staff = current.user.role().is_at_least(platform_core::Role::TenantAdmin)
+        || current.user.role() == platform_core::Role::Owner;
+    if !staff {
+        let decision = auth
+            .authorize_access(
+                &current.user,
+                current.tenant.as_ref(),
+                "media",
+                "library".to_string(),
+            )
+            .await?;
+        if decision == platform_core::AuthDecision::Deny {
+            return view! { <div> components::access_denied() </div> };
+        }
     }
 
     let (library, count): (models::MediaLibrary, models::MediaLibraryCount) =
@@ -183,7 +189,6 @@ async fn tenant_space(cx: &Cx) -> Result {
 
     let auth = platform_core::auth(cx);
     let db = platform_core::db(cx);
-    let storage = platform_core::storage(cx);
 
     let tenant = auth.tenant_by_id(tenant_id).await?.ok_or_redirect("/public")?;
     if !tenant.is_public.unwrap_or(false) {
@@ -223,17 +228,12 @@ async fn tenant_space(cx: &Cx) -> Result {
                     <li class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
                         match item.stream_key.as_deref() {
                             Some(key) => {
-                                let url = storage.presign_get(key, 900).await.ok();
-                                match url {
-                                    Some(src) => {
-                                        <video
-                                            class="aspect-video w-full bg-black object-cover"
-                                            src=(src)
-                                            controls=""
-                                        ></video>
-                                    },
-                                    None => { <div class="aspect-video w-full bg-zinc-800" /> },
-                                }
+                                let src = "/blob/".to_owned() + &platform_core::encode_key(key);
+                                <video
+                                    class="aspect-video w-full bg-black object-cover"
+                                    src=(src)
+                                    controls=""
+                                ></video>
                             },
                             None => { <div class="aspect-video w-full bg-zinc-800" /> },
                         }
@@ -374,18 +374,23 @@ async fn media_detail(cx: &Cx) -> Result {
     let auth = platform_core::auth(cx);
     let current = auth.current_user(cx).await?.ok_or_redirect("/login")?;
     let db = platform_core::db(cx);
-    let storage = platform_core::storage(cx);
 
     // Billing/AAA seam: the tenant's authorizer says whether this playback
-    // may proceed at all.
-    let decision = auth
-        .authorize_access(
+    // may proceed at all. Tenant staff (admin or owner) manage their own
+    // library — the webhook gates customers, not the business.
+    let staff = current.user.role().is_at_least(platform_core::Role::TenantAdmin)
+        || current.user.role() == platform_core::Role::Owner;
+    let decision = if !staff {
+        auth.authorize_access(
             &current.user,
             current.tenant.as_ref(),
             "media",
             raw_id.to_string(),
         )
-        .await?;
+        .await?
+    } else {
+        platform_core::AuthDecision::Allow
+    };
     if decision == platform_core::AuthDecision::Deny {
         return view! { <div> components::access_denied() </div> };
     }
@@ -407,7 +412,7 @@ async fn media_detail(cx: &Cx) -> Result {
     }
 
     let stream_url = match item.and_then(|it| it.stream_key.as_deref()) {
-        Some(key) => Some(storage.presign_get(key, 900).await?),
+        Some(key) => Some("/blob/".to_owned() + &platform_core::encode_key(key)),
         None => None,
     };
 
@@ -772,7 +777,6 @@ async fn media_download(cx: &Cx) -> Result {
         return Err(redirect("/login").into());
     };
     let db = platform_core::db(cx);
-    let storage = platform_core::storage(cx);
 
     let detail: models::MediaDetail =
         db.query(models::media_item_by_id(raw_id.to_owned())?).await?;
@@ -804,11 +808,11 @@ async fn media_download(cx: &Cx) -> Result {
         }
     }
 
-    let url = storage.presign_get(key, 900).await?;
+    let url = "/blob/".to_owned() + &platform_core::encode_key(key);
     Err(redirect(&url).into())
 }
 
-/// Format minor units as dollars for the shop and studio cards.
+/// Format minor units as a currency string.
 fn format_price(price: i64) -> String {
     format!("UGX {price}")
 }

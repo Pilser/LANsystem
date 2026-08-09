@@ -66,6 +66,16 @@ Env the app needs: `HELIX_ENDPOINT=http://helix-LANsystem-LANsystem:8080`,
   `tenant_id.is_some_and(|id| id > 0)`, not `is_some()`, when deciding whether a
   user belongs to a tenant (login redirects, `/apply/*` guards).
 
+## Agent protocol (AI/test harness)
+
+- `GET /api/agent` — JSON catalog of every action; `POST /api/agent` with
+  `{"action":"...","params":{...}}` → `{"ok":true,"result":...}`.
+- Auth: session cookie (uses the human routes' role guards) or
+  `x-agent-key: $LAN_AGENT_KEY` (acts as platform owner; set in
+  deploy/docker-compose.yml, default `local-dev-agent-key`).
+- Actions call the same `db` models and `Auth` service methods as routes —
+  never ad-hoc — so agent bugs == human bugs; use it to reproduce/fix.
+
 ## Git hygiene
 
 `.helix/`, `target/`, `helix-db/`, `topcoat/` are gitignored. Never `git add -f`

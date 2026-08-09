@@ -745,8 +745,8 @@ async fn portal(cx: &Cx) -> Result {
                                 class="w-20 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
                         </label>
                         <label class="flex flex-col gap-1 text-sm">
-                            "Photo"
-                            <input name="photo" type="file" accept="image/*"
+                            "Photos (first is the cover)"
+                            <input name="photo" type="file" accept="image/*" multiple=""
                                 class="text-sm text-zinc-400" />
                         </label>
                         <button

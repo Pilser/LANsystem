@@ -71,6 +71,8 @@ pub mod props {
     pub const PRODUCT_ID: &str = "productId";
     pub const ORDER_ID: &str = "orderId";
     pub const PRODUCT_IMAGE_KEY: &str = "productImageKey";
+    /// JSON array of additional product image keys (gallery).
+    pub const PRODUCT_GALLERY: &str = "galleryKeys";
     pub const STOCK: &str = "stock";
     pub const QUANTITY: &str = "quantity";
     /// Onboarding: the applicant who signed the business up (a `User` id).
@@ -235,7 +237,8 @@ pub enum Property {
     MessageId,
     ProductId,
     OrderId,
-    ProductImageKey,
+ProductImageKey,
+    ProductGallery,
     Stock,
     Quantity,
     /// A property present in the database that is not part of the shared glossary.
@@ -285,6 +288,7 @@ impl Property {
             Self::ProductId => props::PRODUCT_ID,
             Self::OrderId => props::ORDER_ID,
             Self::ProductImageKey => props::PRODUCT_IMAGE_KEY,
+            Self::ProductGallery => props::PRODUCT_GALLERY,
             Self::Stock => props::STOCK,
             Self::Quantity => props::QUANTITY,
             Self::Unknown => "Unknown",
@@ -335,6 +339,7 @@ impl From<&str> for Property {
             props::PRODUCT_ID => Self::ProductId,
             props::ORDER_ID => Self::OrderId,
             props::PRODUCT_IMAGE_KEY => Self::ProductImageKey,
+            props::PRODUCT_GALLERY => Self::ProductGallery,
             props::STOCK => Self::Stock,
             props::QUANTITY => Self::Quantity,
             _ => Self::Unknown,

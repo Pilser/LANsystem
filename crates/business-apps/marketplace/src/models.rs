@@ -20,6 +20,8 @@ pub struct Product {
     pub price: Option<i64>,
     pub currency: Option<String>,
     pub product_image_key: Option<String>,
+    /// JSON array of extra image keys (gallery, beyond the cover).
+    pub gallery_keys: Option<String>,
     pub stock: Option<i64>,
     pub tenant_id: Option<i64>,
     pub is_public: Option<bool>,
@@ -68,6 +70,7 @@ fn project_product() -> Vec<PropertyProjection> {
         PropertyProjection::new(props::PRICE),
         PropertyProjection::new(props::CURRENCY),
         PropertyProjection::new(props::PRODUCT_IMAGE_KEY),
+        PropertyProjection::new(props::PRODUCT_GALLERY),
         PropertyProjection::new(props::STOCK),
         PropertyProjection::new(props::TENANT_ID),
         PropertyProjection::new(props::IS_PUBLIC),
@@ -130,6 +133,7 @@ pub fn create_product(
     price: i64,
     currency: String,
     product_image_key: String,
+    gallery_keys: String,
     stock: i64,
     tenant_id: i64,
 ) -> db::WriteBatch {
@@ -145,6 +149,7 @@ pub fn create_product(
                     (props::PRICE, PropertyInput::param("price")),
                     (props::CURRENCY, PropertyInput::param("currency")),
                     (props::PRODUCT_IMAGE_KEY, PropertyInput::param("product_image_key")),
+                    (props::PRODUCT_GALLERY, PropertyInput::param("gallery_keys")),
                     (props::STOCK, PropertyInput::param("stock")),
                     (props::TENANT_ID, PropertyInput::param("tenant_id")),
                     (props::STATUS, PropertyInput::from("active")),
@@ -152,6 +157,20 @@ pub fn create_product(
                     (props::UPDATED_AT, PropertyInput::Expr(Expr::timestamp())),
                 ],
             ),
+        )
+        .returning(["product"])
+}
+
+/// Append image keys to a product's gallery (JSON array in `galleryKeys`).
+#[query]
+pub fn add_product_gallery(product_id: String, gallery_keys: String) -> db::WriteBatch {
+    write_batch()
+        .var_as(
+            "product",
+            g().n_with_label(labels::PRODUCT)
+                .where_(Predicate::eq(props::PRODUCT_ID, product_id))
+                .set_property(props::PRODUCT_GALLERY, PropertyInput::param("gallery_keys"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
         )
         .returning(["product"])
 }
