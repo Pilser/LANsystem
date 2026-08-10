@@ -18,6 +18,7 @@ use topcoat::{
 };
 
 use crate::{components, models};
+use marketplace_app::models as shop_models;
 
 /// The `id` segment captured by `/media-library/{id}`, read as the raw `str`.
 path_param!(id);
@@ -238,6 +239,11 @@ async fn tenant_space(cx: &Cx) -> Result {
     }
 
     let library: models::MediaLibrary = db.query(models::public_items_by_tenant(tenant_id)?).await?;
+    let shop: shop_models::ProductPage = if tenant.has_app("marketplace") {
+        db.query(shop_models::shop_products_by_tenant(tenant_id)?).await?
+    } else {
+        shop_models::ProductPage { items: Vec::new() }
+    };
     let banner_url = tenant.banner_key.as_deref().filter(|k| !k.is_empty()).map(blob_url);
     let avatar_url = tenant.avatar_key.as_deref().filter(|k| !k.is_empty()).map(blob_url);
     let gallery_urls: Vec<String> = tenant.gallery().into_iter()
@@ -286,12 +292,90 @@ async fn tenant_space(cx: &Cx) -> Result {
             </div>
         </div>
         if tenant.has_app("marketplace") {
-            <a
-                class="mb-6 inline-block rounded-md border border-sky-700 bg-sky-900/40 px-3 py-1.5 text-sm text-sky-200 transition hover:bg-sky-800/40"
-                href=("/shop/".to_owned() + &tenant_id.to_string())
-            >
-                "Open the shop"
-            </a>
+            <section class="mb-8">
+                <div class="mb-3 flex items-baseline gap-3">
+                    <h2 class="text-lg font-semibold">"Shop"</h2>
+                    <span class="rounded-full border border-sky-700 bg-sky-900/40 px-2 py-0.5 text-xs text-sky-200">
+                        "Products on the shelf"
+                    </span>
+                </div>
+                if shop.items.is_empty() {
+                    <p class="text-sm text-zinc-400">
+                        "No products on the shelf yet."
+                    </p>
+                } else {
+                    <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                        for product in &shop.items {
+                            <li class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+                                match product.product_image_key.as_deref() {
+                                    Some(key) => {
+                                        let src = "/blob/".to_owned() + &platform_core::encode_key(key);
+                                        <img class="aspect-video w-full bg-zinc-800 object-cover"
+                                            src=(src)
+                                            alt=(product.title.clone().unwrap_or_default()) />
+                                    },
+                                    None => { <div class="aspect-video w-full bg-zinc-800" /> },
+                                }
+                                let gallery: Vec<String> = product
+                                    .gallery_keys
+                                    .as_deref()
+                                    .and_then(|json| serde_json::from_str(json).ok())
+                                    .unwrap_or_default();
+                                if gallery.len() > 1 {
+                                    <div class="flex gap-1 px-4 pt-3">
+                                        for key in gallery.iter().skip(1).take(8) {
+                                            <img class="h-10 w-10 rounded border border-zinc-800 bg-zinc-800 object-cover"
+                                                src=("/blob/".to_owned() + &platform_core::encode_key(key))
+                                                alt="" loading="lazy" />
+                                        }
+                                        if gallery.len() > 9 {
+                                            <span class="flex h-10 w-10 items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-xs text-zinc-400">
+                                                "+9"
+                                            </span>
+                                        }
+                                    </div>
+                                }
+                                <div class="p-4">
+                                    <div class="flex items-center justify-between gap-2">
+                                        <div class="text-base font-semibold text-zinc-100">
+                                            (product.title.clone().unwrap_or_default())
+                                        </div>
+                                        <span class="text-sm font-bold text-emerald-300">
+                                            (media_price_text(product.price))
+                                        </span>
+                                    </div>
+                                    <p class="mt-1 text-sm text-zinc-400">
+                                        (product.description.clone().unwrap_or_default())
+                                    </p>
+                                    let stock = product.stock.unwrap_or(0);
+                                    if stock > 0 {
+                                        <form
+                                            class="mt-3 flex items-center gap-3"
+                                            method="post"
+                                            action=("/shop/".to_owned() + &tenant_id.to_string() + "/product/" + &product.product_id.clone().unwrap_or_default())
+                                        >
+                                            <select name="quantity" class="w-16 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm outline-none focus:border-sky-400">
+                                                for n in 1..=stock.min(9) {
+                                                    <option value=(n)> (n) </option>
+                                                }
+                                            </select>
+                                            <button
+                                                class="cursor-pointer rounded-md bg-sky-600 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-500"
+                                            >
+                                                "Request to buy"
+                                            </button>
+                                        </form>
+                                    } else {
+                                        <p class="mt-3 text-xs font-semibold uppercase tracking-wide text-red-300">
+                                            "Out of stock"
+                                        </p>
+                                    }
+                                </div>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
         }
         if library.items.is_empty() {
             <p class="py-10 text-sm text-zinc-400">
@@ -331,6 +415,14 @@ async fn tenant_space(cx: &Cx) -> Result {
 fn duration_text(secs: Option<i64>) -> String {
     match secs {
         Some(s) if s > 0 => format!("{}m {}s", s / 60, s % 60),
+        _ => "—".to_string(),
+    }
+}
+
+/// Format a product price (minor units) as a currency string.
+fn media_price_text(cents: Option<i64>) -> String {
+    match cents {
+        Some(c) if c > 0 => format!("UGX {c}"),
         _ => "—".to_string(),
     }
 }

@@ -373,7 +373,27 @@ async fn shop_manage(cx: &Cx) -> Result {
         <h2 class="mb-3 text-lg font-semibold">"Shelf"</h2>
         <ul class="mb-8 grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
             for product in &catalog.items {
-                <li class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+                let is_off_shelf = !product.is_public.unwrap_or(false);
+                let gallery: Vec<String> = product
+                    .gallery_keys
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok())
+                    .unwrap_or_default();
+                let manage_url = |suffix: &str| {
+                    "/shop/product/".to_owned() + &product.product_id.clone().unwrap_or_default() + suffix
+                };
+                <li class="relative overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+                    <span
+                        class=(
+                            if is_off_shelf {
+                                "absolute right-3 top-3 z-10 rounded-full border border-amber-700 bg-amber-950/80 px-2 py-0.5 text-xs font-semibold text-amber-300"
+                            } else {
+                                "absolute right-3 top-3 z-10 rounded-full border border-emerald-900 bg-emerald-950/80 px-2 py-0.5 text-xs font-semibold text-emerald-300"
+                            }
+                        )
+                    >
+                        if is_off_shelf { "Draft — not on the shelf" } else { "On the shelf" }
+                    </span>
                     match product.product_image_key.as_deref() {
                         Some(key) => {
                             <img class="aspect-video w-full bg-zinc-800 object-cover"
@@ -382,17 +402,17 @@ async fn shop_manage(cx: &Cx) -> Result {
                         },
                         None => { <div class="aspect-video w-full bg-zinc-800" /> },
                     }
-                    let gallery: Vec<String> = product
-                        .gallery_keys
-                        .as_deref()
-                        .and_then(|json| serde_json::from_str(json).ok())
-                        .unwrap_or_default();
-                    if !gallery.is_empty() {
+                    if gallery.len() > 1 {
                         <div class="flex gap-1 px-4 pt-3">
                             for key in gallery.iter().skip(1).take(8) {
                                 <img class="h-10 w-10 rounded border border-zinc-800 bg-zinc-800 object-cover"
                                     src=("/blob/".to_owned() + &platform_core::encode_key(key))
                                     alt="" loading="lazy" />
+                            }
+                            if gallery.len() > 9 {
+                                <span class="flex h-10 w-10 items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-xs text-zinc-400">
+                                    "+9"
+                                </span>
                             }
                         </div>
                     }
@@ -411,37 +431,78 @@ async fn shop_manage(cx: &Cx) -> Result {
                         <p class="mt-2 text-xs text-zinc-500">
                             "Stock: " (product.stock.unwrap_or(0))
                         </p>
-                        <form
-                            class="mt-3 flex items-center gap-2"
-                            method="post"
-                            action=("/shop/product/".to_owned() + &product.product_id.clone().unwrap_or_default() + "/photos")
-                            enctype="multipart/form-data"
-                        >
-                            <input name="photo" type="file" accept="image/*" multiple=""
-                                class="text-xs text-zinc-400" />
-                            <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-sky-500" type="submit">
-                                "Add photos"
-                            </button>
-                        </form>
-                        <form
-                            class="mt-2 flex items-center gap-2"
-                            method="post"
-                            action=("/shop/product/".to_owned() + &product.product_id.clone().unwrap_or_default() + "/visibility")
-                        >
-                            <label class="flex items-center gap-2 text-sm text-zinc-300">
-                                <input
-                                    type="checkbox"
-                                    name="is_public"
-                                    value="on"
-                                    checked=(product.is_public.unwrap_or(false))
-                                    class="h-4 w-4 accent-emerald-500"
-                                />
-                                "On the shelf"
-                            </label>
-                            <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-emerald-500" type="submit">
-                                "Save"
-                            </button>
-                        </form>
+                        <div class="mt-3 flex flex-wrap items-center gap-2">
+                            if is_off_shelf {
+                                <form method="post"
+                                    action=(manage_url("/visibility"))
+                                >
+                                    <input type="hidden" name="is_public" value="on" />
+                                    <button class="cursor-pointer rounded-md bg-emerald-600 px-3 py-1 text-xs font-semibold text-white transition hover:bg-emerald-500">
+                                        "Push to shelf"
+                                    </button>
+                                </form>
+                            } else {
+                                <form method="post"
+                                    action=(manage_url("/visibility"))
+                                >
+                                    <button class="cursor-pointer rounded-md border border-amber-700 px-3 py-1 text-xs text-amber-300 transition hover:bg-amber-950/40">
+                                        "Take off shelf"
+                                    </button>
+                                </form>
+                            }
+                            <form
+                                class="flex items-center gap-2"
+                                method="post"
+                                action=(manage_url("/photos"))
+                                enctype="multipart/form-data"
+                            >
+                                <input name="photo" type="file" accept="image/*" multiple=""
+                                    class="text-xs text-zinc-400" />
+                                <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-sky-500" type="submit">
+                                    "Add photos"
+                                </button>
+                            </form>
+                        </div>
+                        <details class="mt-3 rounded-lg border border-zinc-800 bg-zinc-950">
+                            <summary class="cursor-pointer px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:text-zinc-100">
+                                "Edit details · delete"
+                            </summary>
+                            <div class="border-t border-zinc-800 p-3">
+                                <form method="post" action=(manage_url("/update"))
+                                    class="flex flex-wrap items-end gap-3"
+                                >
+                                    <label class="flex flex-col gap-1 text-xs text-zinc-400">
+                                        "Title"
+                                        <input name="title" required="" value=(product.title.clone().unwrap_or_default())
+                                            class="w-40 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm outline-none focus:border-sky-400" />
+                                    </label>
+                                    <label class="flex flex-col gap-1 text-xs text-zinc-400">
+                                        "Price (UGX)"
+                                        <input name="price_ugx" type="number" min="0" value=(product.price.unwrap_or(0))
+                                            class="w-24 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm outline-none focus:border-sky-400" />
+                                    </label>
+                                    <label class="flex flex-col gap-1 text-xs text-zinc-400">
+                                        "Stock"
+                                        <input name="stock" type="number" min="0" value=(product.stock.unwrap_or(0))
+                                            class="w-20 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm outline-none focus:border-sky-400" />
+                                    </label>
+                                    <textarea name="description" rows="2"
+                                        class="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm outline-none focus:border-sky-400"
+                                    >(product.description.clone().unwrap_or_default())</textarea>
+                                    <button class="cursor-pointer rounded-md bg-sky-600 px-3 py-1 text-xs font-semibold text-white transition hover:bg-sky-500">
+                                        "Save changes"
+                                    </button>
+                                </form>
+                                <form method="post" action=(manage_url("/delete"))
+                                    class="mt-3 border-t border-zinc-800 pt-3"
+                                    onsubmit="return confirm('Delete this product and its photos?')"
+                                >
+                                    <button class="cursor-pointer rounded-md border border-red-900 px-3 py-1 text-xs text-red-300 transition hover:bg-red-950/40">
+                                        "Delete product"
+                                    </button>
+                                </form>
+                            </div>
+                        </details>
                     </div>
                 </li>
             }
@@ -705,6 +766,103 @@ fn infer_image_content_type(file_name: &str) -> &'static str {
     } else {
         "image/jpeg"
     }
+}
+
+/// `POST /shop/product/{product_id}/update`: edit a product's title,
+/// description, price and stock (owner or the tenant's admin).
+#[route(POST "/shop/product/{product_id}/update")]
+async fn update_product_details(Form(form): Form<ProductEditForm>, cx: &Cx) -> Result<SeeOther> {
+    let auth = platform_core::auth(cx);
+    let current = auth.current_user(cx).await?.ok_or_redirect("/login")?;
+    let db = platform_core::db(cx);
+
+    let raw: &str = path_param::<ProductId>(cx);
+    let catalog: models::ProductPage = db.query(models::product_by_id(raw.to_string())?).await?;
+    let Some(product) = catalog.items.into_iter().next() else {
+        return Ok(see_other(back_home(&current)));
+    };
+    let tenant_id = product.tenant_id.unwrap_or(NO_TENANT);
+    let is_owner = current.user.role() == platform_core::Role::Owner;
+    let is_own_admin = current
+        .user
+        .role()
+        .is_at_least(platform_core::Role::TenantAdmin)
+        && current.user.tenant_id == Some(tenant_id)
+        && tenant_id != NO_TENANT;
+    if !is_owner && !is_own_admin {
+        return Ok(see_other(back_home(&current)));
+    }
+    if form.title.trim().is_empty() {
+        return Ok(see_other(&shop_after(&current, tenant_id)));
+    }
+    let price = form.price_ugx.parse::<i64>().unwrap_or(0);
+    let _: serde_json::Value = db
+        .query(models::update_product(
+            raw.to_string(),
+            form.title,
+            form.description,
+            price,
+            form.stock.max(0),
+        )?)
+        .await?;
+    Ok(see_other(&shop_after(&current, tenant_id)))
+}
+
+/// The title/description/price/stock edit form on a product card.
+#[derive(Deserialize)]
+struct ProductEditForm {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    price_ugx: String,
+    #[serde(default)]
+    stock: i64,
+}
+
+/// `POST /shop/product/{product_id}/delete`: remove a product from the shop.
+/// Its photos are deleted from storage; the node is soft-deleted (the graph
+/// is append-only, so history rows stay but queries skip `deletedAt`).
+#[route(POST "/shop/product/{product_id}/delete")]
+async fn delete_product_route(cx: &Cx) -> Result<SeeOther> {
+    let auth = platform_core::auth(cx);
+    let current = auth.current_user(cx).await?.ok_or_redirect("/login")?;
+    let db = platform_core::db(cx);
+    let storage = platform_core::storage(cx);
+
+    let raw: &str = path_param::<ProductId>(cx);
+    let catalog: models::ProductPage = db.query(models::product_by_id(raw.to_string())?).await?;
+    let Some(product) = catalog.items.into_iter().next() else {
+        return Ok(see_other(back_home(&current)));
+    };
+    let tenant_id = product.tenant_id.unwrap_or(NO_TENANT);
+    let is_owner = current.user.role() == platform_core::Role::Owner;
+    let is_own_admin = current
+        .user
+        .role()
+        .is_at_least(platform_core::Role::TenantAdmin)
+        && current.user.tenant_id == Some(tenant_id)
+        && tenant_id != NO_TENANT;
+    if !is_owner && !is_own_admin {
+        return Ok(see_other(back_home(&current)));
+    }
+
+    if let Some(key) = product.product_image_key.as_deref().filter(|k| !k.is_empty()) {
+        storage.delete(key).await.ok();
+    }
+    let gallery: Vec<String> = product
+        .gallery_keys
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    for key in gallery.iter().filter(|k| !k.is_empty()) {
+        storage.delete(key).await.ok();
+    }
+    let _: serde_json::Value = db
+        .query(models::delete_product(raw.to_string())?)
+        .await?;
+    Ok(see_other(&shop_after(&current, tenant_id)))
 }
 
 /// `POST /shop/product/{product_id}/visibility`: publish / unpublish.

@@ -1933,6 +1933,7 @@ dependencies = [
  "bytes",
  "db",
  "helix-db",
+ "marketplace-app",
  "platform-core",
  "serde",
  "serde_json",
