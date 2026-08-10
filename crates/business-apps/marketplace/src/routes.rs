@@ -13,7 +13,6 @@ use topcoat::{
     router::content::multipart::Multipart,
     router::content::Form,
     router::error::{RouterErrorExt, SeeOther, redirect, see_other},
-    router::response::IntoResponse,
     router::{page, parse_query_params, path_param, route},
     view::view,
 };
@@ -28,9 +27,6 @@ path_param!(product_id);
 
 /// The `orderId` segment captured by the order-status route.
 path_param!(order_id);
-
-/// The base64url-encoded object key captured by `/blob/{encoded}`.
-path_param!(blob);
 
 /// A `tenantId` of 0 means "platform-level" (the owner has no tenant).
 const NO_TENANT: i64 = 0;
@@ -57,40 +53,6 @@ fn shop_after(current: &platform_auth::CurrentUser, tenant_id: i64) -> String {
 
 /// Display currency for prices stored in minor units.
 const CURRENCY: &str = "UGX";
-
-/// `GET /blob/{encoded}`: stream one stored object back through the app.
-/// Browsers cannot resolve the MinIO container hostname from presigned URLs,
-/// so every image/video/media link in the UI goes through this proxy
-/// (base64url key — object keys contain `/`, which route params cannot hold).
-#[route(GET "/blob/{blob}")]
-async fn blob(cx: &Cx) -> Result<topcoat::router::response::Response> {
-    let encoded: &str = path_param::<Blob>(cx);
-    let storage = platform_core::storage(cx);
-    let key = platform_core::decode_key(encoded)
-        .filter(|key| {
-            key.starts_with("shop/")
-                || key.starts_with("media/")
-                || key.starts_with("profile/")
-        })
-        .ok_or_else(|| topcoat::Error::from(redirect("/public")))?;
-    let Some(bytes) = storage.get_bytes(&key).await? else {
-        return Err(topcoat::Error::from(redirect("/public")));
-    };
-    let content_type = match key.split('.').next_back() {
-        Some("png") => "image/png",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        Some("mp4") => "video/mp4",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        _ => "application/octet-stream",
-    };
-    ((
-        [("content-type", content_type), ("cache-control", "public, max-age=3600")],
-        bytes,
-    )
-        .into_response(cx))
-}
 
 #[derive(Deserialize)]
 struct ShopQuery {

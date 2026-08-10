@@ -82,6 +82,22 @@ Env the app needs: `HELIX_ENDPOINT=http://helix-LANsystem-LANsystem:8080`,
   deploy/docker-compose.yml, default `local-dev-agent-key`).
 - Actions call the same `db` models and `Auth` service methods as routes —
   never ad-hoc — so agent bugs == human bugs; use it to reproduce/fix.
+- Shop actions mirror the web CRUD: `shop.product.list/create/update/
+  setVisibility/delete` (delete also removes stored photos like the web route).
+
+## Cross-app wiring (separation facts)
+
+- One binary, one router (`apps/lan`), apps discovered at link time via
+  topcoat's `inventory` — `#[route]`/`#[page]` work from ANY crate in the
+  binary, so shared platform routes can live outside business apps.
+- **`GET /blob/{encoded}` lives in `platform-core` (`src/blob.rs`)** and serves
+  every object prefix (`shop/`, `media/`, `profile/`). It is NOT a business
+  app's route; if a page 404s on `/blob/…`, the platform-core mod is missing.
+- Cross-app deps today: `media-app` → `marketplace-app` (space page embeds
+  products + buy flow posts to marketplace's route), `admin-app` →
+  marketplace+media (portal pages render their models/`product_manage_card`).
+  `Tenant` profile-photo keys live in `platform-auth` (not an app); upload/
+  remove routes in admin-app; display in media/admin.
 
 ## Git hygiene
 

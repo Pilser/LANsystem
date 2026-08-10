@@ -3,6 +3,7 @@
 //! context, so business-app crates pull them out of `&Cx` via [`db`],
 //! [`storage`], [`auth`], and [`services`].
 
+mod blob;
 mod bootstrap;
 pub mod error;
 mod services;

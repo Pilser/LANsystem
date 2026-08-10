@@ -191,6 +191,15 @@ const CATALOG: &[ActionSpec] = &[
         ],
     },
     ActionSpec {
+        name: "shop.product.delete",
+        group: "shop",
+        summary: "Permanently remove a product: deletes its photos from storage and tombstones the row (owner or the tenant's admin).",
+        params: &[
+            ParamSpec { name: "product_id", kind: "string", required: true, desc: "Product id." },
+            ParamSpec { name: "delete_photos", kind: "bool", required: false, desc: "Also delete the stored product photos (default true)." },
+        ],
+    },
+    ActionSpec {
         name: "shop.order.list",
         group: "shop",
         summary: "A tenant's order tickets (owner or the tenant's admin).",
@@ -587,6 +596,33 @@ async fn run(cx: &Cx, scope: &Scope, action: &str, params: &Value) -> Result<Val
             let _: serde_json::Value =
                 db.query(market_models::set_product_public(product_id, is_public)?).await?;
             Ok(json!({ "is_public": is_public }))
+        }
+
+        "shop.product.delete" => {
+            let product_id = want_str(params, "product_id").map_err(bad)?;
+            let page: market_models::ProductPage =
+                db.query(market_models::product_by_id(product_id.clone())?).await?;
+            let Some(product) = page.items.into_iter().next() else {
+                return Err(bad("product not found".to_string()).into());
+            };
+            require_tenant(scope, product.tenant_id.unwrap_or(NO_TENANT)).await?;
+            if opt_bool(params, "delete_photos").unwrap_or(true) {
+                let storage = platform_core::storage(cx);
+                if let Some(key) = product.product_image_key.as_deref().filter(|k| !k.is_empty()) {
+                    storage.delete(key).await.ok();
+                }
+                let gallery: Vec<String> = product
+                    .gallery_keys
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok())
+                    .unwrap_or_default();
+                for key in gallery.iter().filter(|k| !k.is_empty()) {
+                    storage.delete(key).await.ok();
+                }
+            }
+            let _: serde_json::Value =
+                db.query(market_models::delete_product(product_id.clone())?).await?;
+            Ok(json!({ "deleted": true, "product_id": product_id }))
         }
 
         "shop.order.list" => {
