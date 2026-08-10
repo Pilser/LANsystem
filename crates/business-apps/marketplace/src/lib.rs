@@ -5,6 +5,7 @@
 //! shop through the tenant's space page; tenant admins manage products and
 //! orders from the shop management page.
 
+pub mod components;
 pub mod models;
 pub mod routes;
 

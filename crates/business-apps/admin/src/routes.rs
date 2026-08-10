@@ -1257,7 +1257,7 @@ async fn portal_shop(cx: &Cx) -> Result {
                 db.query(marketplace_app::models::orders_by_tenant(tenant_id)?).await?;
 
             <section class="mb-10">
-                <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+                <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
                     <h2 class="mb-3 text-sm font-medium text-zinc-400">"Add a product"</h2>
                     <form method="post" enctype="multipart/form-data"
                         action=("/shop-manage/".to_owned() + &tenant_id.to_string() + "/product")
@@ -1284,7 +1284,7 @@ async fn portal_shop(cx: &Cx) -> Result {
                                 class="w-20 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
                         </label>
                         <label class="flex flex-col gap-1 text-sm">
-                            "Photos (first is the cover)"
+                            "Photos (first is the cover, the rest join the gallery)"
                             <input name="photo" type="file" accept="image/*" multiple=""
                                 class="text-sm text-zinc-400" />
                         </label>
@@ -1294,37 +1294,24 @@ async fn portal_shop(cx: &Cx) -> Result {
                             "Add"
                         </button>
                     </form>
-                    <ul class="mt-4 divide-y divide-zinc-800">
-                        for product in &products.items {
-                            <li class="flex flex-wrap items-center gap-4 py-3">
-                                <div class="min-w-0 flex-1">
-                                    <p class="truncate text-sm font-semibold text-zinc-200">
-                                        (product.title.clone().unwrap_or_default())
-                                    </p>
-                                    <p class="text-xs text-zinc-500">
-                                        (portal_price_ug(product.price))
-                                        " · stock " (product.stock.unwrap_or(0))
-                                    </p>
-                                </div>
-                                <form method="post"
-                                    action=("/shop/product/".to_owned() + &product.product_id.clone().unwrap_or_default() + "/visibility")
-                                    class="flex items-center gap-2"
-                                >
-                                    <input type="hidden" name="is_public"
-                                        value=(if product.is_public.unwrap_or(false) { "off" } else { "on" }) />
-                                    <span class="text-xs text-zinc-500">
-                                        if product.is_public.unwrap_or(false) { "listed" } else { "hidden" }
-                                    </span>
-                                    <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-emerald-500"
-                                        type="submit">
-                                        "Publish settings"
-                                    </button>
-                                </form>
-                            </li>
-                        }
-                    </ul>
                 </div>
-                <div class="mt-4 rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+
+                <div class="mt-8">
+                    <h2 class="mb-3 text-lg font-semibold">"Shelf"</h2>
+                    if products.items.is_empty() {
+                        <p class="py-6 text-sm text-zinc-400">
+                            "No products yet — add the first one above."
+                        </p>
+                    } else {
+                        <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                            for product in &products.items {
+                                marketplace_app::components::product_manage_card(product: product)
+                            }
+                        </ul>
+                    }
+                </div>
+
+                <div class="mt-8 rounded-xl border border-zinc-800 bg-zinc-900 p-4">
                     <h2 class="mb-3 text-sm font-medium text-zinc-400">"Orders"</h2>
                     <ul class="divide-y divide-zinc-800">
                         for order in &orders.items {
