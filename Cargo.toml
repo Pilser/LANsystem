@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/db",
     "crates/storage",
+    "crates/serverless-core",
     "crates/platform/core",
     "crates/platform/auth",
     "crates/business-apps/app-contract",
@@ -39,6 +40,14 @@ aws-config = "1.6"
 aws-sdk-s3 = { version = "1.90", default-features = false, features = ["rt-tokio"] }
 aws-credential-types = "1.2"
 bytes = "1"
+
+# --- Serverless boards ---
+# Traits + types registry only; the turso engine (vendored at ../turso) is a
+# separate workspace with its own lockfile and is wired in by the serverless
+# business app, mirroring zerowrapper's path dependency.
+serverless-core = { path = "crates/serverless-core" }
+turso = { path = "../turso/bindings/rust" }
+sha2 = "0.10"
 
 # --- Full-stack web framework ---
 topcoat = { version = "0.5.0", features = ["websocket", "multipart", "sse", "htmx", "tailwind"] }

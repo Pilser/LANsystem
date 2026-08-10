@@ -27,7 +27,8 @@ services:
       - "127.0.0.1:4321:3000"
     volumes:
       - ../target/release/lan:/usr/local/bin/lan:ro
-    entrypoint: ["/bin/sh", "-c", "apt-get update -qq && apt-get install -y -qq ca-certificates >/dev/null 2>&1 && /usr/local/bin/lan"]
+      - lan-data:/data
+    entrypoint: ["/bin/sh", "-c", "apt-get update -qq && apt-get install -y -qq ca-certificates >/dev/null 2>&1 && mkdir -p /data/dbs && /usr/local/bin/lan"]
     environment:
       # --- Helix graph DB (in-container gateway, host port 6969) ---
       HELIX_ENDPOINT: http://helix-LANsystem-LANsystem:8080
@@ -50,3 +51,9 @@ networks:
   helix-net:
     external: true
     name: helix-LANsystem-LANsystem-net
+
+volumes:
+  # Per-tenant turso DB files for the serverless boards (see docs/SERVERLESS_PLAN.md).
+  # A named volume (not a bind mount) so the files persist across `down`/`up`
+  # and no host path is required.
+  lan-data:
