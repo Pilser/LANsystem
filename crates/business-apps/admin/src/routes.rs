@@ -14,6 +14,7 @@ use topcoat::{
     Result,
     context::Cx,
     router::{
+        content::multipart::Multipart,
         content::Form,
         error::{RouterErrorExt, SeeOther, see_other},
         page, parse_query_params, route,
@@ -77,6 +78,17 @@ pub struct SaveUserForm {
 #[derive(Deserialize)]
 pub struct UserIdForm {
     pub user_id: String,
+}
+
+/// Which tenant profile photo to delete: `which` is `banner`, `avatar` or
+/// `gallery` (with the stored `key`).
+#[derive(Deserialize)]
+pub struct ProfileRemoveForm {
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    pub which: String,
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// Update an established tenant's settings (owner console card).
@@ -523,12 +535,91 @@ async fn tenants(cx: &Cx) -> Result {
                                     <input name="tagline" value=(tenant.description.as_deref().unwrap_or_default())
                                         class="w-64 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-400" />
                                 </label>
-                                <button
+<button
                                     class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1 text-xs transition hover:border-sky-400"
                                 >
                                     "Save settings"
                                 </button>
                             </form>
+                            <div class="mt-4 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                                    "Photos (banner · icon · gallery)"
+                                </h3>
+                                <div class="mb-3 flex items-center gap-3">
+                                    <div class="h-10 w-16 shrink-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-900">
+                                        if let Some(key) = tenant.banner_key.as_deref().filter(|k| !k.is_empty()) {
+                                            <img src=("/blob/".to_owned() + &platform_core::encode_key(key)) alt="" class="h-10 w-16 object-cover" />
+                                        } else {
+                                            <div class="flex h-10 w-16 items-center justify-center text-[10px] text-zinc-600">"banner"</div>
+                                        }
+                                    </div>
+                                    <div class="h-10 w-10 shrink-0 overflow-hidden rounded-full border border-zinc-800 bg-zinc-900">
+                                        if let Some(key) = tenant.avatar_key.as_deref().filter(|k| !k.is_empty()) {
+                                            <img src=("/blob/".to_owned() + &platform_core::encode_key(key)) alt="" class="h-10 w-10 object-cover" />
+                                        } else {
+                                            <div class="flex h-10 w-10 items-center justify-center rounded-full text-[10px] text-zinc-600">"icon"</div>
+                                        }
+                                    </div>
+                                    let thumbs: Vec<String> = tenant.gallery().into_iter()
+                                        .filter(|k| !k.is_empty()).take(3).map(|k| platform_core::encode_key(&k)).collect();
+                                    for key in &thumbs {
+                                        <img src=("/blob/".to_owned() + key) alt="" class="h-10 w-14 shrink-0 rounded-md border border-zinc-800 object-cover" />
+                                    }
+                                </div>
+                                <div class="flex flex-wrap gap-2">
+                                    <form method="post" enctype="multipart/form-data" action="/admin/tenant/profile/media"
+                                        class="flex items-end gap-2"
+                                    >
+                                        <input type="hidden" name="tenant_id" value=(id_text(tenant.tenant_id)) />
+                                        <input type="hidden" name="kind" value="banner" />
+                                        <input name="photo" type="file" accept="image/*"
+                                            class="w-36 text-[10px] text-zinc-500 file:mr-2 file:cursor-pointer file:rounded file:border-0 file:bg-zinc-800 file:px-2 file:py-1 file:text-[10px] file:text-zinc-300" />
+                                        <button class="cursor-pointer rounded border border-zinc-700 px-2 py-1 text-[10px] transition hover:border-sky-400">
+                                            "Banner"
+                                        </button>
+                                    </form>
+                                    <form method="post" enctype="multipart/form-data" action="/admin/tenant/profile/media"
+                                        class="flex items-end gap-2"
+                                    >
+                                        <input type="hidden" name="tenant_id" value=(id_text(tenant.tenant_id)) />
+                                        <input type="hidden" name="kind" value="avatar" />
+                                        <input name="photo" type="file" accept="image/*"
+                                            class="w-36 text-[10px] text-zinc-500 file:mr-2 file:cursor-pointer file:rounded file:border-0 file:bg-zinc-800 file:px-2 file:py-1 file:text-[10px] file:text-zinc-300" />
+                                        <button class="cursor-pointer rounded border border-zinc-700 px-2 py-1 text-[10px] transition hover:border-sky-400">
+                                            "Icon"
+                                        </button>
+                                    </form>
+                                    <form method="post" enctype="multipart/form-data" action="/admin/tenant/profile/media"
+                                        class="flex items-end gap-2"
+                                    >
+                                        <input type="hidden" name="tenant_id" value=(id_text(tenant.tenant_id)) />
+                                        <input type="hidden" name="kind" value="gallery" />
+                                        <input name="photo" type="file" accept="image/*" multiple=""
+                                            class="w-36 text-[10px] text-zinc-500 file:mr-2 file:cursor-pointer file:rounded file:border-0 file:bg-zinc-800 file:px-2 file:py-1 file:text-[10px] file:text-zinc-300" />
+                                        <button class="cursor-pointer rounded border border-zinc-700 px-2 py-1 text-[10px] transition hover:border-sky-400">
+                                            "Gallery +"
+                                        </button>
+                                    </form>
+                                    if tenant.banner_key.as_deref().is_some_and(|k| !k.is_empty()) {
+                                        <form method="post" action="/admin/tenant/profile/remove" class="flex items-end">
+                                            <input type="hidden" name="tenant_id" value=(id_text(tenant.tenant_id)) />
+                                            <input type="hidden" name="which" value="banner" />
+                                            <button class="cursor-pointer rounded border border-zinc-700 px-2 py-1 text-[10px] transition hover:border-red-400 hover:text-red-300">
+                                                "× banner"
+                                            </button>
+                                        </form>
+                                    }
+                                    if tenant.avatar_key.as_deref().is_some_and(|k| !k.is_empty()) {
+                                        <form method="post" action="/admin/tenant/profile/remove" class="flex items-end">
+                                            <input type="hidden" name="tenant_id" value=(id_text(tenant.tenant_id)) />
+                                            <input type="hidden" name="which" value="avatar" />
+                                            <button class="cursor-pointer rounded border border-zinc-700 px-2 py-1 text-[10px] transition hover:border-red-400 hover:text-red-300">
+                                                "× icon"
+                                            </button>
+                                        </form>
+                                    }
+                                </div>
+                            </div>
                         </li>
                     }
                 </ul>
@@ -681,10 +772,25 @@ async fn users(cx: &Cx) -> Result {
 
 /// Secondary nav shared by every portal page.
 #[component]
-async fn portal_tabs(active: &str) -> Result {
+async fn portal_tabs(active: &str, cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let tenant_id = auth
+        .current_user(cx)
+        .await?
+        .and_then(|u| u.user.tenant_id);
+    let tenant = auth.tenant_by_id(tenant_id.unwrap_or(0)).await?;
+    let mut sections = vec![("/portal", "Overview")];
+    if tenant.as_ref().is_some_and(|t| t.has_app("marketplace")) {
+        sections.push(("/portal/shop", "Shop"));
+    }
+    if tenant.as_ref().is_some_and(|t| t.has_app("media")) {
+        sections.push(("/portal/media", "Media"));
+    }
+    sections.push(("/portal/members", "Members"));
+    sections.push(("/portal/settings", "Settings"));
     view! {
         <nav class="mb-8 flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/60 p-1 text-sm">
-            for &(href, label) in PORTAL_SECTIONS {
+            for &(href, label) in &sections {
                 <a
                     href=(href)
                     class=(
@@ -789,6 +895,27 @@ async fn portal_settings(cx: &Cx) -> Result {
         .await?
         .unwrap_or_default();
     let (domain_label, domain_class) = domain_pill(&tenant);
+    let banner_url = tenant
+        .banner_key
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .map(|k| "/blob/".to_owned() + &platform_core::encode_key(k));
+    let avatar_url = tenant
+        .avatar_key
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .map(|k| "/blob/".to_owned() + &platform_core::encode_key(k));
+    let gallery_urls: Vec<(String, String)> = tenant
+        .gallery()
+        .into_iter()
+        .filter(|k| !k.is_empty())
+        .map(|k| {
+            (
+                "/blob/".to_owned() + &platform_core::encode_key(&k),
+                k,
+            )
+        })
+        .collect();
 
     view! {
         portal_tabs(active: "/portal/settings")
@@ -804,7 +931,116 @@ async fn portal_settings(cx: &Cx) -> Result {
         </div>
 
         <section class="mb-10">
-            <h2 class="mb-3 text-xl font-semibold">"Directory entry"</h2>
+            <h2 class="mb-3 text-xl font-semibold">"Business profile"</h2>
+            <p class="mb-3 max-w-2xl text-sm text-zinc-400">
+                "These pictures show on your card in the public directory: a
+                wide banner on top, a circular profile icon over it, then the
+                gallery below the description."
+            </p>
+            <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+                <div class="mb-4">
+                    <div class="mb-2 text-sm font-medium text-zinc-300">"Banner"</div>
+                    <div class="h-28 w-full rounded-lg border border-zinc-800 bg-zinc-950 object-cover">
+                        if let Some(url) = &banner_url {
+                            <img src=(url) alt="" class="h-28 w-full rounded-lg object-cover" />
+                        } else {
+                            <div class="flex h-28 w-full items-center justify-center text-sm text-zinc-600">
+                                "No banner yet"
+                            </div>
+                        }
+                    </div>
+                    <div class="mt-2 flex flex-wrap items-center gap-2">
+                        <form method="post" enctype="multipart/form-data" action="/admin/tenant/profile/media"
+                            class="flex items-center gap-2"
+                        >
+                            <input type="hidden" name="kind" value="banner" />
+                            <input name="photo" type="file" accept="image/*"
+                                class="w-56 text-sm text-zinc-400 file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-zinc-800 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-zinc-300 hover:file:bg-zinc-700" />
+                            <button class="cursor-pointer rounded-md bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-500">
+                                "Set banner"
+                            </button>
+                        </form>
+                        if banner_url.is_some() {
+                            <form method="post" action="/admin/tenant/profile/remove">
+                                <input type="hidden" name="which" value="banner" />
+                                <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition hover:border-red-400 hover:text-red-300">
+                                    "Remove banner"
+                                </button>
+                            </form>
+                        }
+                    </div>
+                </div>
+                <div class="mb-4 border-t border-zinc-800 pt-4">
+                    <div class="mb-2 text-sm font-medium text-zinc-300">"Profile icon"</div>
+                    <div class="flex flex-wrap items-center gap-4">
+                        <div class="h-16 w-16 shrink-0 overflow-hidden rounded-full border border-zinc-800 bg-zinc-950">
+                            if let Some(url) = &avatar_url {
+                                <img src=(url) alt="" class="h-16 w-16 object-cover" />
+                            } else {
+                                <div class="flex h-16 w-16 items-center justify-center text-sm text-zinc-600">
+                                    "—"
+                                </div>
+                            }
+                        </div>
+                        <form method="post" enctype="multipart/form-data" action="/admin/tenant/profile/media"
+                            class="flex items-center gap-2"
+                        >
+                            <input type="hidden" name="kind" value="avatar" />
+                            <input name="photo" type="file" accept="image/*"
+                                class="w-56 text-sm text-zinc-400 file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-zinc-800 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-zinc-300 hover:file:bg-zinc-700" />
+                            <button class="cursor-pointer rounded-md bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-500">
+                                "Set icon"
+                            </button>
+                        </form>
+                        if avatar_url.is_some() {
+                            <form method="post" action="/admin/tenant/profile/remove">
+                                <input type="hidden" name="which" value="avatar" />
+                                <button class="cursor-pointer rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition hover:border-red-400 hover:text-red-300">
+                                    "Remove icon"
+                                </button>
+                            </form>
+                        }
+                    </div>
+                </div>
+                <div class="border-t border-zinc-800 pt-4">
+                    <div class="mb-2 text-sm font-medium text-zinc-300">"Gallery"</div>
+                    if gallery_urls.is_empty() {
+                        <p class="mb-3 text-sm text-zinc-500">"Nothing in the gallery yet."</p>
+                    } else {
+                        <div class="mb-3 flex flex-wrap gap-2">
+                            for (url, key) in &gallery_urls {
+                                <div class="overflow-hidden rounded-md border border-zinc-800">
+                                    <img src=(url) alt="" class="h-16 w-24 object-cover" />
+                                    <form method="post" action="/admin/tenant/profile/remove">
+                                        <input type="hidden" name="which" value="gallery" />
+                                        <input type="hidden" name="key" value=(key) />
+                                        <button class="w-full cursor-pointer bg-zinc-800 py-0.5 text-[10px] text-zinc-400 transition hover:bg-red-900/50 hover:text-red-300">
+                                            "Remove"
+                                        </button>
+                                    </form>
+                                </div>
+                            }
+                        </div>
+                    }
+                    <form method="post" enctype="multipart/form-data" action="/admin/tenant/profile/media"
+                        class="flex items-center gap-2"
+                    >
+                        <input type="hidden" name="kind" value="gallery" />
+                        <input name="photo" type="file" accept="image/*" multiple=""
+                            class="w-full max-w-xs text-sm text-zinc-400 file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-zinc-800 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-zinc-300 hover:file:bg-zinc-700" />
+                        <button class="cursor-pointer rounded-md bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-500">
+                            "Add photos"
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <section class="mb-10">
+            <h2 class="mb-3 text-xl font-semibold">"Directory listing"</h2>
+            <p class="mb-3 max-w-2xl text-sm text-zinc-400">
+                "Controls how this tenant's card appears in the public directory."
+            </p>
             <form method="post" action="/admin/tenant/visibility"
                 class="rounded-xl border border-zinc-800 bg-zinc-900 p-4"
             >
@@ -1443,6 +1679,177 @@ pub async fn tenant_visibility(
     Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")))
 }
 
+/// `POST /admin/tenant/profile/media`: upload (or replace) a tenant's profile
+/// media — `kind` is `banner` or `avatar` (single file, replaces) or
+/// `gallery` (one or more files, appended). A tenant admin sets their own
+/// tenant; the owner may act on any tenant (hidden `tenant_id` field).
+#[route(POST "/admin/tenant/profile/media")]
+pub async fn tenant_profile_media(
+    mut upload: Multipart,
+    cx: &Cx,
+) -> Result<SeeOther> {
+    let auth = platform_core::auth(cx);
+    let storage = platform_core::storage(cx);
+    let current = staff(cx, &auth).await?;
+    let role = current.user.role();
+    let is_owner = role == Role::Owner;
+    let mut kind = String::new();
+    let mut form_tenant_id: Option<i64> = None;
+    let mut files: Vec<(String, bytes::Bytes)> = Vec::new();
+    while let Some(field) = upload.next_field().await? {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "kind" => kind = field.text().await?.to_string(),
+            "tenant_id" => form_tenant_id = field.text().await?.trim().parse().ok(),
+            "photo" => {
+                let file_name = field.file_name().map(str::to_owned).unwrap_or_default();
+                let bytes = field.bytes().await?;
+                if !bytes.is_empty() {
+                    files.push((file_name, bytes));
+                }
+            }
+            _ => {}
+        }
+    }
+    let tenant_id = if is_owner {
+        form_tenant_id.or_else(|| current.user.tenant_id)
+    } else {
+        current.user.tenant_id
+    };
+    let Some(tenant_id) = tenant_id else {
+        return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")));
+    };
+    let tenant = auth.tenant_by_id(tenant_id).await?.unwrap_or_default();
+    let mut banner = tenant.banner_key.clone().unwrap_or_default();
+    let mut avatar = tenant.avatar_key.clone().unwrap_or_default();
+    let mut gallery = tenant.gallery();
+    match kind.as_str() {
+        "banner" => {
+            if let Some((file_name, bytes)) = files.into_iter().next() {
+                let ext = profile_extension(&file_name);
+                let key = format!("profile/{tenant_id}/banner.{ext}");
+                storage.put(&key, bytes, profile_content_type(&file_name)).await?;
+                banner = key;
+            }
+        }
+        "avatar" => {
+            if let Some((file_name, bytes)) = files.into_iter().next() {
+                let ext = profile_extension(&file_name);
+                let key = format!("profile/{tenant_id}/avatar.{ext}");
+                storage.put(&key, bytes, profile_content_type(&file_name)).await?;
+                avatar = key;
+            }
+        }
+        "gallery" => {
+            let mut next = next_gallery_index(&gallery);
+            for (file_name, bytes) in files {
+                let ext = profile_extension(&file_name);
+                let key = format!("profile/{tenant_id}/gallery-{next}.{ext}");
+                storage.put(&key, bytes, profile_content_type(&file_name)).await?;
+                gallery.push(key);
+                next += 1;
+            }
+        }
+        _ => return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings"))),
+    }
+    let gallery_json = serde_json::to_string(&gallery).unwrap_or_else(|_| "[]".to_string());
+    auth.set_tenant_profile_media(tenant_id, banner, avatar, gallery_json)
+        .await?;
+    Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")))
+}
+
+/// The next free `gallery-<n>` index: max stored index + 1 (a removed item
+/// never gets its key reused, so keys stay unique across appends).
+fn next_gallery_index(gallery: &[String]) -> usize {
+    gallery
+        .iter()
+        .filter_map(|key| {
+            key.rsplit_once("gallery-")
+                .and_then(|(_, tail)| tail.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<usize>().ok())
+        })
+        .max()
+        .map_or(0, |n| n + 1)
+}
+
+/// The file extension to bake into a profile key so `/blob` can serve a
+/// correct content type.
+fn profile_extension(file_name: &str) -> &'static str {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "png"
+    } else if lower.ends_with(".gif") {
+        "gif"
+    } else if lower.ends_with(".webp") {
+        "webp"
+    } else {
+        "jpg"
+    }
+}
+
+/// Sniff a content type for an uploaded profile image by extension.
+fn profile_content_type(file_name: &str) -> &'static str {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
+}
+
+/// `POST /admin/tenant/profile/remove`: delete a profile photo. `which` is
+/// `banner`, `avatar` or `gallery`; gallery removals carry the stored key in
+/// `key`. The stored object is deleted from S3 and the keys rewritten.
+#[route(POST "/admin/tenant/profile/remove")]
+pub async fn tenant_profile_remove(
+    Form(form): Form<ProfileRemoveForm>,
+    cx: &Cx,
+) -> Result<SeeOther> {
+    let auth = platform_core::auth(cx);
+    let storage = platform_core::storage(cx);
+    let current = staff(cx, &auth).await?;
+    let tenant_id = match (current.user.role() == Role::Owner, current.user.tenant_id) {
+        (true, _) => optional_i64(form.tenant_id),
+        (false, Some(tid)) => Some(tid),
+        (false, None) => None,
+    };
+    let Some(tenant_id) = tenant_id else {
+        return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")));
+    };
+    let mut tenant = auth.tenant_by_id(tenant_id).await?.unwrap_or_default();
+    let mut banner = tenant.banner_key.clone().unwrap_or_default();
+    let mut avatar = tenant.avatar_key.clone().unwrap_or_default();
+    let mut gallery = tenant.gallery();
+    match form.which.as_str() {
+        "banner" => {
+            if !banner.is_empty() {
+                storage.delete(&banner).await.ok();
+                banner = String::new();
+            }
+        }
+        "avatar" => {
+            if !avatar.is_empty() {
+                storage.delete(&avatar).await.ok();
+                avatar = String::new();
+            }
+        }
+        "gallery" => {
+            if let Some(key) = form.key.as_deref().filter(|k| !k.is_empty()) {
+                gallery.retain(|k| k != key);
+                storage.delete(key).await.ok();
+            }
+        }
+        _ => return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings"))),
+    }
+    let gallery_json = serde_json::to_string(&gallery).unwrap_or_else(|_| "[]".to_string());
+    auth.set_tenant_profile_media(tenant_id, banner, avatar, gallery_json)
+        .await?;
+    Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")))
+}
+
 /// `POST /admin/tenants/toggle`: suspend / re-activate a tenant (owner only).
 #[route(POST "/admin/tenants/toggle")]
 pub async fn tenants_toggle(
@@ -1483,13 +1890,6 @@ const CONSOLE_SECTIONS: &[(&str, &str)] = &[
 ];
 
 /// Tenant portal sections (tab order).
-const PORTAL_SECTIONS: &[(&str, &str)] = &[
-    ("/portal", "Overview"),
-    ("/portal/shop", "Shop"),
-    ("/portal/media", "Media"),
-    ("/portal/members", "Members"),
-    ("/portal/settings", "Settings"),
-];
 
 fn is_known_domain(domain: &str) -> bool {
     DOMAINS.iter().any(|(value, _)| *value == domain)

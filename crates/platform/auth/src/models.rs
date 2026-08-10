@@ -144,6 +144,16 @@ pub struct Tenant {
     /// Tenant tagline shown on directory cards.
     #[serde(default)]
     pub description: Option<String>,
+    /// Tenant profile: the wide banner shown on the directory card.
+    #[serde(default, rename = "tenantBannerKey")]
+    pub banner_key: Option<String>,
+    /// Tenant profile: the circular profile icon on the directory card.
+    #[serde(default, rename = "tenantAvatarKey")]
+    pub avatar_key: Option<String>,
+    /// Tenant profile: JSON array of gallery image keys for the directory
+    /// card slideshow.
+    #[serde(default, rename = "tenantGalleryKeys")]
+    pub gallery_keys: Option<String>,
     /// The applicant user who signed this business up (`pending` tenants only).
     #[serde(default)]
     pub applicant_id: Option<i64>,
@@ -181,6 +191,14 @@ impl Tenant {
         self.apps_enabled
             .as_deref()
             .is_some_and(|apps| apps.iter().any(|enabled| enabled == app_id))
+    }
+
+    /// The stored JSON gallery array parsed as keys (empty when unset).
+    pub fn gallery(&self) -> Vec<String> {
+        self.gallery_keys
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default()
     }
 }
 

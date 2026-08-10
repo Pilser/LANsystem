@@ -13,11 +13,13 @@ name = "admin-app"
 version = "0.1.0"
 dependencies = [
  "app-contract",
+ "bytes",
  "marketplace-app",
  "media-app",
  "platform-auth",
  "platform-core",
  "serde",
+ "serde_json",
  "topcoat",
 ]
 

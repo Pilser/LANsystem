@@ -573,6 +573,26 @@ impl Auth {
         Ok(rows.tenants)
     }
 
+    /// Rewrite a tenant's profile media keys; empty strings clear fields.
+    pub async fn set_tenant_profile_media(
+        &self,
+        tenant_id: i64,
+        banner_key: String,
+        avatar_key: String,
+        gallery_keys: String,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .db
+            .query(queries::set_tenant_profile_media(
+                tenant_id,
+                banner_key,
+                avatar_key,
+                gallery_keys,
+            )?)
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_user_active(&self, user_id: i64, active: bool) -> Result<()> {
         let status = if active { "active" } else { "suspended" };
         let _: serde_json::Value = self

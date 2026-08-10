@@ -57,11 +57,18 @@ Env the app needs: `HELIX_ENDPOINT=http://helix-LANsystem-LANsystem:8080`,
   container) pin the network, so prune fails silently partway and leaves the data
   volume if you skip the disconnect. After prune, `docker compose down` before
   `up -d` (compose caches the old network ID); re-attach `billing-hook`.
-- Ad-hoc graph reads: `POST :6969/v2/query` with envelope
-  `{"request_type":"read","query_name":null,"query":{"read":{"entries":[
-  {"query":{"name":"t","root":{"project":{"input":{"nodes":{"reference":"all"}},
-  "projections":[{"property":{"source":"tenantId","alias":"tenantId"}}]}}}]},
-  "returns":["t"]}},"parameters":{}}`.
+- Ad-hoc graph reads/writes: `POST :6969/v2/query`. **`returns` lives inside
+  `read`/`write` as a sibling of `entries`** (the entry `query` takes no
+  `returns`; the old envelope with `returns` inside the entry 400s). Working
+  read: `{"request_type":"read","query_name":null,"query":{"read":{"returns":
+  ["t"],"entries":[{"query":{"name":"t","root":{"project":{"input":
+  {"nodes":{"reference":"all"}},"projections":[{"property":{"source":
+  "tenantId","alias":"tenantId"}}]}}}}]}},"parameters":{}}`. Label-scoped
+  node reads/writes use `nodes_where` with an `and` predicate on `$label` +
+  a property; writes `set` on the matched node **in place** (versions append
+  at the storage layer, but a label+id-filtered read returns only the newest
+  version). Property names are prefixed (e.g. `tenantBannerKey` not
+  `bannerKey`); `$id` is the node id.
 - Known gotcha: `NO_TENANT = 0` is stored as real `Some(0)` — always test
   `tenant_id.is_some_and(|id| id > 0)`, not `is_some()`, when deciding whether a
   user belongs to a tenant (login redirects, `/apply/*` guards).

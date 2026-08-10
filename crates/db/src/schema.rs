@@ -48,6 +48,12 @@ pub mod props {
     /// Shared flag: a tenant shows in the public directory, a media item is
     /// listed on the tenant's public surface.
     pub const IS_PUBLIC: &str = "isPublic";
+    /// Tenant profile: the wide banner shown on the directory card.
+    pub const TENANT_BANNER_KEY: &str = "tenantBannerKey";
+    /// Tenant profile: the circular profile icon on the directory card.
+    pub const TENANT_AVATAR_KEY: &str = "tenantAvatarKey";
+    /// Tenant profile: JSON array of gallery image keys (directory slideshow).
+    pub const TENANT_GALLERY: &str = "tenantGalleryKeys";
     pub const SESSION_ID: &str = "sessionId";
     pub const EXPIRES_AT: &str = "expiresAt";
     pub const NAME: &str = "name";
@@ -215,6 +221,9 @@ pub enum Property {
     BillingEnabled,
     AuthWebhookUrl,
     IsPublic,
+    TenantBannerKey,
+    TenantAvatarKey,
+    TenantGallery,
     SessionId,
     ExpiresAt,
     Name,
@@ -265,6 +274,9 @@ impl Property {
             Self::BillingEnabled => props::BILLING_ENABLED,
             Self::AuthWebhookUrl => props::AUTH_WEBHOOK_URL,
             Self::IsPublic => props::IS_PUBLIC,
+            Self::TenantBannerKey => props::TENANT_BANNER_KEY,
+            Self::TenantAvatarKey => props::TENANT_AVATAR_KEY,
+            Self::TenantGallery => props::TENANT_GALLERY,
             Self::SessionId => props::SESSION_ID,
             Self::ExpiresAt => props::EXPIRES_AT,
             Self::Name => props::NAME,
@@ -316,6 +328,9 @@ impl From<&str> for Property {
             props::BILLING_ENABLED => Self::BillingEnabled,
             props::AUTH_WEBHOOK_URL => Self::AuthWebhookUrl,
             props::IS_PUBLIC => Self::IsPublic,
+            props::TENANT_BANNER_KEY => Self::TenantBannerKey,
+            props::TENANT_AVATAR_KEY => Self::TenantAvatarKey,
+            props::TENANT_GALLERY => Self::TenantGallery,
             props::SESSION_ID => Self::SessionId,
             props::EXPIRES_AT => Self::ExpiresAt,
             props::NAME => Self::Name,

@@ -79,6 +79,25 @@ async fn root(cx: &Cx, slot: Result) -> Result {
 
     let current = platform_core::auth(cx).current_user(cx).await?;
     let on_console = uri(cx).path().starts_with("/admin");
+    let tenant = match &current {
+        Some(c) if c.user.tenant_id.is_some_and(|id| id > 0) => {
+            platform_core::auth(cx)
+                .tenant_by_id(c.user.tenant_id.unwrap_or(0))
+                .await
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
+    let has_media = tenant.as_ref().is_some_and(|t| t.has_app("media"));
+    let has_marketplace = tenant.as_ref().is_some_and(|t| t.has_app("marketplace"));
+    let tenant_href = |current: Option<&platform_core::CurrentUser>| -> String {
+        current
+            .and_then(|c| c.user.tenant_id)
+            .filter(|id| *id > 0)
+            .map(|id| format!("/shop/{id}"))
+            .unwrap_or_else(|| "/public".to_string())
+    };
 
     view! {
         <!DOCTYPE html>
@@ -132,7 +151,12 @@ Some(_) if on_console => {
                                 </a>
                                 <nav class="flex gap-4 text-sm text-zinc-400">
                                     <a class="hover:text-zinc-100" href="/public">"Directory"</a>
-                                    <a class="hover:text-zinc-100" href="/media-library">"Media Library"</a>
+                                    if has_media {
+                                        <a class="hover:text-zinc-100" href="/media-library">"Media Library"</a>
+                                    }
+                                    if has_marketplace {
+                                        <a class="hover:text-zinc-100" href=(tenant_href(current.as_ref()))>"Shop"</a>
+                                    }
                                     match current.as_ref().map(|c| c.user.role()) {
                                         Some(Role::Owner) => {
                                             <a class="hover:text-zinc-100" href="/admin">"Console"</a>

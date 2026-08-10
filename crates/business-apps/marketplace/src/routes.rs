@@ -67,7 +67,11 @@ async fn blob(cx: &Cx) -> Result<topcoat::router::response::Response> {
     let encoded: &str = path_param::<Blob>(cx);
     let storage = platform_core::storage(cx);
     let key = platform_core::decode_key(encoded)
-        .filter(|key| key.starts_with("shop/") || key.starts_with("media/"))
+        .filter(|key| {
+            key.starts_with("shop/")
+                || key.starts_with("media/")
+                || key.starts_with("profile/")
+        })
         .ok_or_else(|| topcoat::Error::from(redirect("/public")))?;
     let Some(bytes) = storage.get_bytes(&key).await? else {
         return Err(topcoat::Error::from(redirect("/public")));

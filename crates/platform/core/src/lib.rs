@@ -9,7 +9,7 @@ mod services;
 
 pub use error::{Error, Result};
 pub use platform_auth::authorizer::AuthDecision;
-pub use platform_auth::{Auth, Role};
+pub use platform_auth::{Auth, CurrentUser, Role};
 pub use services::{auth, db, services, storage, Services};
 
 /// Object keys surfacing in browser URLs are transported base64url (the keys

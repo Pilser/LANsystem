@@ -17,6 +17,8 @@ platform-auth = { path = "../../platform/auth" }
 marketplace-app = { path = "../../business-apps/marketplace" }
 media-app = { path = "../../business-apps/media" }
 serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true

@@ -166,6 +166,9 @@ pub fn all_tenants() -> ReadBatch {
                     PropertyProjection::new(props::AUTH_WEBHOOK_URL),
                     PropertyProjection::new(props::IS_PUBLIC),
                     PropertyProjection::new(props::DESCRIPTION),
+                    PropertyProjection::new(props::TENANT_BANNER_KEY),
+                    PropertyProjection::new(props::TENANT_AVATAR_KEY),
+                    PropertyProjection::new(props::TENANT_GALLERY),
                     PropertyProjection::new(props::APPLICANT_ID),
                     PropertyProjection::new(props::PAYMENT_STATUS),
                     PropertyProjection::new(props::CREATED_AT),
@@ -193,6 +196,9 @@ pub fn tenant_by_id(tenant_id: i64) -> ReadBatch {
                     PropertyProjection::new(props::AUTH_WEBHOOK_URL),
                     PropertyProjection::new(props::IS_PUBLIC),
                     PropertyProjection::new(props::DESCRIPTION),
+                    PropertyProjection::new(props::TENANT_BANNER_KEY),
+                    PropertyProjection::new(props::TENANT_AVATAR_KEY),
+                    PropertyProjection::new(props::TENANT_GALLERY),
                     PropertyProjection::new(props::APPLICANT_ID),
                     PropertyProjection::new(props::PAYMENT_STATUS),
                     PropertyProjection::new(props::CREATED_AT),
@@ -237,6 +243,9 @@ pub fn tenant_by_applicant(applicant_id: i64) -> ReadBatch {
                     PropertyProjection::new(props::AUTH_WEBHOOK_URL),
                     PropertyProjection::new(props::IS_PUBLIC),
                     PropertyProjection::new(props::DESCRIPTION),
+                    PropertyProjection::new(props::TENANT_BANNER_KEY),
+                    PropertyProjection::new(props::TENANT_AVATAR_KEY),
+                    PropertyProjection::new(props::TENANT_GALLERY),
                     PropertyProjection::new(props::APPLICANT_ID),
                     PropertyProjection::new(props::PAYMENT_STATUS),
                     PropertyProjection::new(props::CREATED_AT),
@@ -450,6 +459,9 @@ pub fn public_tenants() -> ReadBatch {
                     PropertyProjection::new(props::APPS_ENABLED),
                     PropertyProjection::new(props::DESCRIPTION),
                     PropertyProjection::new(props::IS_PUBLIC),
+                    PropertyProjection::new(props::TENANT_BANNER_KEY),
+                    PropertyProjection::new(props::TENANT_AVATAR_KEY),
+                    PropertyProjection::new(props::TENANT_GALLERY),
                 ]),
         )
         .returning(["tenants"])
@@ -480,6 +492,28 @@ pub fn set_tenant_billing(tenant_id: i64, billing_enabled: bool, webhook_url: St
                 .where_(Predicate::eq(props::TENANT_ID, tenant_id))
                 .set_property(props::BILLING_ENABLED, PropertyInput::param("billing_enabled"))
                 .set_property(props::AUTH_WEBHOOK_URL, PropertyInput::param("webhook_url")),
+        )
+        .returning(["tenant"])
+}
+
+/// Rewrite a tenant's profile media keys (banner / avatar / gallery JSON).
+/// Empty strings clear the field.
+#[query]
+pub fn set_tenant_profile_media(
+    tenant_id: i64,
+    banner_key: String,
+    avatar_key: String,
+    gallery_keys: String,
+) -> WriteBatch {
+    write_batch()
+        .var_as(
+            "tenant",
+            g().n_with_label(labels::TENANT)
+                .where_(Predicate::eq(props::TENANT_ID, tenant_id))
+                .set_property(props::TENANT_BANNER_KEY, PropertyInput::param("banner_key"))
+                .set_property(props::TENANT_AVATAR_KEY, PropertyInput::param("avatar_key"))
+                .set_property(props::TENANT_GALLERY, PropertyInput::param("gallery_keys"))
+                .set_property(props::UPDATED_AT, Expr::timestamp()),
         )
         .returning(["tenant"])
 }

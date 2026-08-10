@@ -22,6 +22,11 @@ use crate::{components, models};
 /// The `id` segment captured by `/media-library/{id}`, read as the raw `str`.
 path_param!(id);
 
+/// A storage key turned into the public `/blob/` proxy URL.
+fn blob_url(key: &str) -> String {
+    "/blob/".to_owned() + &platform_core::encode_key(key)
+}
+
 /// `?error=` codes rendered by the upload page.
 const UPLOAD_ERRORS: &[(&str, &str)] = &[
     ("quota", "This upload would exceed the tenant's storage quota."),
@@ -153,34 +158,60 @@ async fn public_directory(cx: &Cx) -> Result {
         } else {
             <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
                 for tenant in &tenants {
+                    let banner_url = tenant.banner_key.as_deref().filter(|k| !k.is_empty()).map(blob_url);
+                    let avatar_url = tenant.avatar_key.as_deref().filter(|k| !k.is_empty()).map(blob_url);
+                    let gallery_urls: Vec<String> = tenant.gallery().into_iter()
+                        .filter(|k| !k.is_empty()).take(3).map(|k| blob_url(&k)).collect();
                     <li>
                         <a
-                            class="block rounded-xl border border-zinc-800 bg-zinc-900 transition hover:-translate-y-0.5 hover:border-emerald-500"
+                            class="block overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 transition hover:-translate-y-0.5 hover:border-emerald-500"
                             href=("/tenant/".to_owned() + tenant.tenant_id.map(|id| id.to_string()).as_deref().unwrap_or("0"))
                         >
-                            <span
-                                class="rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-xs font-semibold text-emerald-300"
-                            >
-                                "Open service"
-                            </span>
-                            <div class="mt-3 flex flex-wrap items-center gap-2">
-                                <div class="text-lg font-semibold text-zinc-100">
-                                    (tenant.tenant_name.as_deref().unwrap_or("—"))
-                                </div>
-                                if tenant.has_app("media") {
-                                    <span class="rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-xs font-semibold text-emerald-300">
-                                        "Media"
-                                    </span>
+                            <div class="relative h-28 w-full bg-zinc-950">
+                                if let Some(url) = &banner_url {
+                                    <img src=(url) alt="" class="h-28 w-full object-cover" />
+                                } else {
+                                    <div class="flex h-28 w-full items-center justify-center text-xs text-zinc-600">
+                                        "Business"
+                                    </div>
                                 }
-                                if tenant.has_app("marketplace") {
-                                    <span class="rounded-full border border-sky-700 bg-sky-900/40 px-2 py-0.5 text-xs font-semibold text-sky-200">
-                                        "Marketplace"
-                                    </span>
+                                <div class="absolute -bottom-0 left-4 h-16 w-16 rounded-full border-2 border-zinc-900 bg-zinc-800">
+                                    if let Some(url) = &avatar_url {
+                                        <img src=(url) alt="" class="h-full w-full rounded-full object-cover" />
+                                    } else {
+                                        <div class="flex h-full w-full items-center justify-center rounded-full bg-zinc-800 text-lg text-zinc-500">
+                                            (tenant.tenant_name.as_deref().and_then(|n| n.chars().next()).unwrap_or('?'))
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                            <div class="px-4 pb-4 pt-6">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <div class="text-lg font-semibold text-zinc-100">
+                                        (tenant.tenant_name.as_deref().unwrap_or("—"))
+                                    </div>
+                                    if tenant.has_app("media") {
+                                        <span class="rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-xs font-semibold text-emerald-300">
+                                            "Media"
+                                        </span>
+                                    }
+                                    if tenant.has_app("marketplace") {
+                                        <span class="rounded-full border border-sky-700 bg-sky-900/40 px-2 py-0.5 text-xs font-semibold text-sky-200">
+                                            "Marketplace"
+                                        </span>
+                                    }
+                                </div>
+                                <p class="mt-1 text-sm text-zinc-400">
+                                    (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))
+                                </p>
+                                if !gallery_urls.is_empty() {
+                                    <div class="mt-3 flex gap-2">
+                                        for url in &gallery_urls {
+                                            <img src=(url) alt="" class="h-14 w-20 rounded-md border border-zinc-800 object-cover" />
+                                        }
+                                    </div>
                                 }
                             </div>
-                            <p class="mt-1 text-sm text-zinc-400">
-                                (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))
-                            </p>
                         </a>
                     </li>
                 }
@@ -207,6 +238,10 @@ async fn tenant_space(cx: &Cx) -> Result {
     }
 
     let library: models::MediaLibrary = db.query(models::public_items_by_tenant(tenant_id)?).await?;
+    let banner_url = tenant.banner_key.as_deref().filter(|k| !k.is_empty()).map(blob_url);
+    let avatar_url = tenant.avatar_key.as_deref().filter(|k| !k.is_empty()).map(blob_url);
+    let gallery_urls: Vec<String> = tenant.gallery().into_iter()
+        .filter(|k| !k.is_empty()).map(|k| blob_url(&k)).collect();
 
     view! {
         <a
@@ -215,12 +250,41 @@ async fn tenant_space(cx: &Cx) -> Result {
         >
             "← Back to the feed"
         </a>
-        <h1 class="mb-1 text-3xl font-bold">
-            (tenant.tenant_name.as_deref().unwrap_or("—"))
-        </h1>
-        <p class="mb-6 text-sm text-zinc-400">
-            (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))
-        </p>
+        <div class="mb-6 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+            <div class="relative h-40 w-full bg-zinc-950">
+                if let Some(url) = &banner_url {
+                    <img src=(url) alt="" class="h-40 w-full object-cover" />
+                } else {
+                    <div class="flex h-40 w-full items-center justify-center text-sm text-zinc-600">
+                        "Business"
+                    </div>
+                }
+                <div class="absolute -bottom-0 left-5 h-20 w-20 overflow-hidden rounded-full border-4 border-zinc-900 bg-zinc-800">
+                    if let Some(url) = &avatar_url {
+                        <img src=(url) alt="" class="h-full w-full object-cover" />
+                    } else {
+                        <div class="flex h-full w-full items-center justify-center text-xl text-zinc-500">
+                            (tenant.tenant_name.as_deref().and_then(|n| n.chars().next()).unwrap_or('?'))
+                        </div>
+                    }
+                </div>
+            </div>
+            <div class="px-5 pb-5 pt-8">
+                <h1 class="text-3xl font-bold">
+                    (tenant.tenant_name.as_deref().unwrap_or("—"))
+                </h1>
+                <p class="mt-1 text-sm text-zinc-400">
+                    (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))
+                </p>
+                if !gallery_urls.is_empty() {
+                    <div class="mt-4 flex flex-wrap gap-2">
+                        for url in &gallery_urls {
+                            <img src=(url) alt="" class="h-16 w-24 rounded-md border border-zinc-800 object-cover" />
+                        }
+                    </div>
+                }
+            </div>
+        </div>
         if tenant.has_app("marketplace") {
             <a
                 class="mb-6 inline-block rounded-md border border-sky-700 bg-sky-900/40 px-3 py-1.5 text-sm text-sky-200 transition hover:bg-sky-800/40"
