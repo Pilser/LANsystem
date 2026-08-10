@@ -31,6 +31,17 @@ const UPLOAD_ERRORS: &[(&str, &str)] = &[
 /// A `tenantId` of 0 means "platform-level" (the owner has no tenant).
 const NO_TENANT: i64 = 0;
 
+/// Where a staff principal bounces after a mutation: the owner to the console
+/// (media is managed from the console's tenant page), a tenant admin back to
+/// their portal media page.
+fn back_for(role: platform_core::Role) -> &'static str {
+    if role == platform_core::Role::Owner {
+        "/admin/tenants"
+    } else {
+        "/portal/media"
+    }
+}
+
 #[derive(Deserialize)]
 struct UploadQuery {
     #[serde(default)]
@@ -740,25 +751,25 @@ async fn media_order_status(Form(form): Form<OrderStatusForm>, cx: &Cx) -> Resul
     let tenant_id = current.user.tenant_id.filter(|t| *t > 0);
     let is_owner = current.user.role() == platform_core::Role::Owner;
     if !is_owner && tenant_id.is_none() {
-        return Ok(see_other("/portal"));
+        return Ok(see_other(back_for(current.user.role())));
     }
     let allowed_status = MEDIA_ORDER_STATUSES
         .iter()
         .any(|(value, _)| *value == form.status);
     if !allowed_status {
-        return Ok(see_other("/portal"));
+        return Ok(see_other(back_for(current.user.role())));
     }
     if !is_owner {
         let orders: models::MediaOrderPage =
             db.query(models::media_orders_by_tenant(tenant_id.unwrap_or(0))?).await?;
         if !orders.items.iter().any(|o| o.order_id.as_deref() == Some(raw_id)) {
-            return Ok(see_other("/portal"));
+            return Ok(see_other(back_for(current.user.role())));
         }
     }
     let _: serde_json::Value =
         db.query(models::set_media_order_status(raw_id.to_owned(), form.status.clone())?)
             .await?;
-    Ok(see_other("/portal"))
+    Ok(see_other(back_for(current.user.role())))
 }
 
 #[derive(Deserialize)]

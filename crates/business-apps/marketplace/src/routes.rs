@@ -35,6 +35,26 @@ path_param!(blob);
 /// A `tenantId` of 0 means "platform-level" (the owner has no tenant).
 const NO_TENANT: i64 = 0;
 
+/// Where a staff principal bounces after a mutation: the owner to the console
+/// (into the shop feature page), a tenant admin back to their portal shop.
+fn back_home(current: &platform_auth::CurrentUser) -> &'static str {
+    if current.user.role() == platform_auth::Role::Owner {
+        "/admin"
+    } else {
+        "/portal/shop"
+    }
+}
+
+/// Where a shop mutation bounces: the owner to the shop management page, a
+/// tenant admin back to the shop feature page of their portal.
+fn shop_after(current: &platform_auth::CurrentUser, tenant_id: i64) -> String {
+    if current.user.role() == platform_auth::Role::Owner {
+        format!("/shop-manage/{tenant_id}")
+    } else {
+        "/portal/shop".to_string()
+    }
+}
+
 /// Display currency for prices stored in minor units.
 const CURRENCY: &str = "UGX";
 
@@ -285,16 +305,16 @@ async fn set_order_status(Form(form): Form<StatusForm>, cx: &Cx) -> Result<SeeOt
         && current.user.tenant_id == Some(tenant_id)
         && tenant_id != NO_TENANT;
     if !is_owner && !is_member {
-        return Ok(see_other(&format!("/shop-manage/{tenant_id}")));
+        return Ok(see_other(&shop_after(&current, tenant_id)));
     }
     let status = form.status.as_str();
     if !["accepted", "cancelled", "done"].contains(&status) {
-        return Ok(see_other(&format!("/shop-manage/{tenant_id}")));
+        return Ok(see_other(&shop_after(&current, tenant_id)));
     }
 
     let _: serde_json::Value =
         db.query(models::set_order_status(raw_order.to_string(), status.to_string())?).await?;
-    Ok(see_other(&format!("/shop-manage/{tenant_id}")))
+    Ok(see_other(&shop_after(&current, tenant_id)))
 }
 
 /// The status buttons on an order ticket.
@@ -517,7 +537,7 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
 
     let raw: &str = path_param::<TenantId>(cx);
     let Ok(tenant_id) = raw.parse::<i64>() else {
-        return Ok(see_other("/admin"));
+        return Ok(see_other(back_home(&current)));
     };
     let is_owner = current.user.role() == platform_core::Role::Owner;
     let is_own_admin = current
@@ -527,7 +547,7 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
         && current.user.tenant_id == Some(tenant_id)
         && tenant_id != NO_TENANT;
     if !is_owner && !is_own_admin {
-        return Ok(see_other("/admin"));
+        return Ok(see_other(back_home(&current)));
     }
 
     let mut title = String::new();
@@ -588,7 +608,7 @@ async fn create_product(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> {
         )?)
         .await?;
 
-    Ok(see_other(&format!("/shop-manage/{tenant_id}")))
+    Ok(see_other(&shop_after(&current, tenant_id)))
 }
 
 /// `POST /shop/product/{product_id}/photos`: append more photos to a
@@ -603,7 +623,7 @@ async fn add_product_photos(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> 
     let raw: &str = path_param::<ProductId>(cx);
     let catalog: models::ProductPage = db.query(models::product_by_id(raw.to_string())?).await?;
     let Some(product) = catalog.items.into_iter().next() else {
-        return Ok(see_other("/admin"));
+        return Ok(see_other(back_home(&current)));
     };
     let tenant_id = product.tenant_id.unwrap_or(NO_TENANT);
     let is_owner = current.user.role() == platform_core::Role::Owner;
@@ -614,7 +634,7 @@ async fn add_product_photos(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> 
         && current.user.tenant_id == Some(tenant_id)
         && tenant_id != NO_TENANT;
     if !is_owner && !is_own_admin {
-        return Ok(see_other("/admin"));
+        return Ok(see_other(back_home(&current)));
     }
 
     let mut photos: Vec<(String, Bytes)> = Vec::new();
@@ -646,7 +666,7 @@ async fn add_product_photos(mut upload: Multipart, cx: &Cx) -> Result<SeeOther> 
             serde_json::to_string(&existing).unwrap_or_else(|_| "[]".to_string()),
         )?)
         .await?;
-    Ok(see_other(&format!("/shop-manage/{tenant_id}")))
+    Ok(see_other(&shop_after(&current, tenant_id)))
 }
 
 /// The file extension to bake into a photo key so the `/blob` proxy can serve
@@ -693,7 +713,7 @@ async fn set_product_visibility(Form(form): Form<ProductVisibilityForm>, cx: &Cx
     let raw: &str = path_param::<ProductId>(cx);
     let catalog: models::ProductPage = db.query(models::product_by_id(raw.to_string())?).await?;
     let Some(product) = catalog.items.into_iter().next() else {
-        return Ok(see_other("/admin"));
+        return Ok(see_other(back_home(&current)));
     };
     let tenant_id = product.tenant_id.unwrap_or(NO_TENANT);
     let is_owner = current.user.role() == platform_core::Role::Owner;
@@ -704,13 +724,13 @@ async fn set_product_visibility(Form(form): Form<ProductVisibilityForm>, cx: &Cx
         && current.user.tenant_id == Some(tenant_id)
         && tenant_id != NO_TENANT;
     if !is_owner && !is_own_admin {
-        return Ok(see_other("/admin"));
+        return Ok(see_other(back_home(&current)));
     }
 
     let _: serde_json::Value = db
         .query(models::set_product_public(raw.to_string(), form.is_public.is_some())?)
         .await?;
-    Ok(see_other(&format!("/shop-manage/{tenant_id}")))
+    Ok(see_other(&shop_after(&current, tenant_id)))
 }
 
 /// The "On the shelf" checkbox.

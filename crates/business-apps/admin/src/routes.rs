@@ -18,7 +18,7 @@ use topcoat::{
         error::{RouterErrorExt, SeeOther, see_other},
         page, parse_query_params, route,
     },
-    view::view,
+    view::{component, view},
 };
 
 use platform_auth::{Auth, CurrentUser, Role, Tenant};
@@ -52,13 +52,10 @@ async fn portal_user(cx: &Cx, auth: &Auth) -> Result<CurrentUser> {
     .ok_or_redirect("/")?)
 }
 
-/// Where a staff principal bounces after a mutation.
-fn home_for(current: &CurrentUser) -> &'static str {
-    if current.user.role() == Role::Owner {
-        "/admin"
-    } else {
-        "/portal"
-    }
+/// Where a staff principal bounces after a mutation: the owner back to
+/// their console section, a tenant admin to their portal section.
+fn back_after(current: &CurrentUser, owner_dest: &'static str, portal_dest: &'static str) -> &'static str {
+    if current.user.role() == Role::Owner { owner_dest } else { portal_dest }
 }
 
 // ---------------------------------------------------------------------------
@@ -139,22 +136,106 @@ struct AdminQuery {
 // The owner console
 // ---------------------------------------------------------------------------
 
-/// `GET /admin`: applications to approve, established tenants, and the
-/// per-domain payment policies. Owner only.
+/// The owner console: an overview dashboard at `/admin` plus feature pages
+/// for the application queue, established tenants, onboarding policies and
+/// users. Owner only.
+
+/// Secondary nav shared by every console page.
+#[component]
+async fn console_tabs(active: &str) -> Result {
+    view! {
+        <nav class="mb-8 flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/60 p-1 text-sm">
+            for &(href, label) in CONSOLE_SECTIONS {
+                <a
+                    href=(href)
+                    class=(
+                        if active == href {
+                            "rounded-lg bg-zinc-800 px-3 py-1.5 font-semibold text-zinc-100"
+                        } else {
+                            "rounded-lg px-3 py-1.5 text-zinc-400 transition hover:text-zinc-100"
+                        }
+                    )
+                >
+                    (label)
+                </a>
+            }
+        </nav>
+    }
+}
+
+/// `GET /admin`: owner overview — quick counts and entry points.
 #[page("/admin")]
 async fn console(cx: &Cx) -> Result {
     let auth = platform_core::auth(cx);
     let _current = console_user(cx, &auth).await?;
 
-    let query = parse_query_params::<AdminQuery>(cx).ok();
-    let want_domain = query.as_ref().and_then(|q| q.domain.as_deref());
-    let want_status = query.as_ref().and_then(|q| q.status.as_deref());
+    let all_tenants = auth.tenants().await?;
+    let user_rows = auth.users().await?;
+    let pending = all_tenants.iter().filter(|tenant| tenant.is_pending()).count();
+    let rejected = all_tenants.iter().filter(|tenant| tenant.is_rejected()).count();
+    let established = all_tenants
+        .iter()
+        .filter(|tenant| tenant.is_active() || tenant.is_suspended())
+        .count();
+
+    view! {
+        console_tabs(active: "/admin")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Console"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "The platform. Businesses arrive here from the public
+                application form."
+            </p>
+        </div>
+
+        <section class="mb-10">
+            <div class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-4">
+                <a href="/admin/applications" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(pending)</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Applications waiting"</div>
+                </a>
+                <a href="/admin/tenants" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(established)</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Established tenants"</div>
+                </a>
+                <a href="/admin/users" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(user_rows.len())</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Users"</div>
+                </a>
+                <a href="/admin/policies" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(DOMAINS.len())</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Onboarding domains"</div>
+                </a>
+            </div>
+        </section>
+
+        if pending > 0 {
+            <a
+                href="/admin/applications"
+                class="mb-10 flex items-center justify-between rounded-xl border border-amber-800 bg-amber-950/40 p-4 text-sm text-amber-200 transition hover:border-amber-600"
+            >
+                <span>"Applications are waiting for your approval."</span>
+                <span class="font-semibold">"Review queue →"</span>
+            </a>
+        } else if rejected > 0 {
+            <p class="mb-10 text-sm text-zinc-500">
+                (rejected) " rejected applications sit in the queue."
+            </p>
+        }
+    }
+}
+
+/// `GET /admin/applications`: the owner's approval queue — pending
+/// applications approve/reject with quota, plus the rejected history.
+#[page("/admin/applications")]
+async fn applications(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let _current = console_user(cx, &auth).await?;
 
     let all_tenants = auth.tenants().await?;
-    let users = auth.users().await?;
-    let policies = auth.domain_policies().await?;
-
-    let applicant_names: HashMap<i64, String> = users
+    let user_rows = auth.users().await?;
+    let applicant_names: HashMap<i64, String> = user_rows
         .iter()
         .filter_map(|view| {
             view.user
@@ -165,37 +246,25 @@ async fn console(cx: &Cx) -> Result {
 
     let (mut pending, rest): (Vec<_>, Vec<_>) =
         all_tenants.into_iter().partition(|tenant| tenant.is_pending());
-    let (mut rejected, mut tenants): (Vec<_>, Vec<_>) =
+    let (mut rejected, _): (Vec<_>, Vec<_>) =
         rest.into_iter().partition(|tenant| tenant.is_rejected());
-    tenants.retain(|tenant| {
-        let domain_ok = match want_domain {
-            Some("media") => tenant.has_app("media"),
-            Some("marketplace") => tenant.has_app("marketplace"),
-            _ => true,
-        };
-        let status_ok = match want_status {
-            Some("active") => tenant.is_active(),
-            Some("suspended") => tenant.is_suspended(),
-            _ => true,
-        };
-        domain_ok && status_ok
-    });
     pending.sort_by_key(|tenant| tenant.created_at.unwrap_or(0));
     rejected.sort_by_key(|tenant| tenant.created_at.unwrap_or(0));
 
     view! {
+        console_tabs(active: "/admin/applications")
+
         <div class="mb-8">
-            <h1 class="text-3xl font-bold">"Console"</h1>
+            <h1 class="text-3xl font-bold">"Applications"</h1>
             <p class="mt-1 text-sm text-zinc-400">
-                "The platform. Businesses arrive here from the public
-                application form."
+                "The approval queue — every business here applied from the
+                public directory."
             </p>
         </div>
 
-        // -- Applications -----------------------------------------------------
         <section class="mb-10">
             <div class="mb-3 flex items-baseline gap-3">
-                <h2 class="text-xl font-semibold">"Applications"</h2>
+                <h2 class="text-xl font-semibold">"Incoming"</h2>
                 <span class="text-sm text-zinc-500">(pending.len())" waiting"</span>
             </div>
             if pending.is_empty() && rejected.is_empty() {
@@ -279,12 +348,54 @@ async fn console(cx: &Cx) -> Result {
                 </div>
             }
         </section>
+    }
+}
 
-        // -- Established tenants ------------------------------------------------
+/// `GET /admin/tenants`: established tenants, filterable by domain and
+/// status, each with its settings forms (quota, domain, billing, directory).
+#[page("/admin/tenants")]
+async fn tenants(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let _current = console_user(cx, &auth).await?;
+
+    let query = parse_query_params::<AdminQuery>(cx).ok();
+    let want_domain = query.as_ref().and_then(|q| q.domain.as_deref());
+    let want_status = query.as_ref().and_then(|q| q.status.as_deref());
+
+    let all_tenants = auth.tenants().await?;
+    let mut tenants: Vec<_> = all_tenants
+        .into_iter()
+        .filter(|tenant| !tenant.is_pending() && !tenant.is_rejected())
+        .collect();
+    tenants.retain(|tenant| {
+        let domain_ok = match want_domain {
+            Some("media") => tenant.has_app("media"),
+            Some("marketplace") => tenant.has_app("marketplace"),
+            _ => true,
+        };
+        let status_ok = match want_status {
+            Some("active") => tenant.is_active(),
+            Some("suspended") => tenant.is_suspended(),
+            _ => true,
+        };
+        domain_ok && status_ok
+    });
+
+    view! {
+        console_tabs(active: "/admin/tenants")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Tenants"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "Every approved business — quota, domain, billing and public
+                directory listing."
+            </p>
+        </div>
+
         <section class="mb-10">
             <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <h2 class="text-xl font-semibold">"Tenants"</h2>
-                <form method="get" action="/admin"
+                <h2 class="text-xl font-semibold">"Established"</h2>
+                <form method="get" action="/admin/tenants"
                     class="flex flex-wrap items-end gap-3 text-xs text-zinc-400"
                 >
                     <label class="flex flex-col gap-1">
@@ -316,7 +427,7 @@ async fn console(cx: &Cx) -> Result {
                         "Filter"
                     </button>
                     if want_domain.is_some() || want_status.is_some() {
-                        <a href="/admin"
+                        <a href="/admin/tenants"
                             class="self-end rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition hover:border-sky-400"
                         >
                             "Reset"
@@ -423,15 +534,30 @@ async fn console(cx: &Cx) -> Result {
                 </ul>
             }
         </section>
+    }
+}
 
-        // -- Domain payment policies -------------------------------------------
-        <section class="mb-10">
-            <h2 class="mb-3 text-xl font-semibold">"Domain onboarding"</h2>
-            <p class="mb-3 max-w-2xl text-sm text-zinc-400">
+/// `GET /admin/policies`: the owner's per-domain onboarding policies.
+#[page("/admin/policies")]
+async fn policies(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let _current = console_user(cx, &auth).await?;
+
+    let policies = auth.domain_policies().await?;
+
+    view! {
+        console_tabs(active: "/admin/policies")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Domain onboarding"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
                 "Per domain you can require that new businesses pay first: the
                 application then calls this webhook, and only a `paid` answer
                 moves the application into the queue."
             </p>
+        </div>
+
+        <section class="mb-10">
             <ul class="grid list-none grid-cols-1 gap-3 p-0 md:grid-cols-2">
                 for (value, label) in DOMAINS {
                     let policy = policies.iter().find(|p| p.domain.as_deref() == Some(*value));
@@ -460,10 +586,29 @@ async fn console(cx: &Cx) -> Result {
                 }
             </ul>
         </section>
+    }
+}
 
-        // -- Users -------------------------------------------------------------
+/// `GET /admin/users`: every user on the platform, suspend or drop sessions.
+#[page("/admin/users")]
+async fn users(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let _current = console_user(cx, &auth).await?;
+
+    let user_rows = auth.users().await?;
+
+    view! {
+        console_tabs(active: "/admin/users")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Users"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "Everyone signed in on the platform — suspend a user or drop
+                their sessions."
+            </p>
+        </div>
+
         <section class="mb-10">
-            <h2 class="mb-3 text-xl font-semibold">"Users"</h2>
             <div class="overflow-x-auto rounded-xl border border-zinc-800">
                 <table class="w-full text-left text-sm">
                     <thead>
@@ -477,7 +622,7 @@ async fn console(cx: &Cx) -> Result {
                         </tr>
                     </thead>
                     <tbody>
-                        for user in &users {
+                        for user in &user_rows {
                             <tr class="border-b border-zinc-800/60 last:border-0">
                                 <td class="px-4 py-2 font-mono text-xs">
                                     (user.user.username.as_deref().unwrap_or("—"))
@@ -526,20 +671,119 @@ async fn console(cx: &Cx) -> Result {
         </section>
     }
 }
-
 // ---------------------------------------------------------------------------
 // The tenant admin portal
 // ---------------------------------------------------------------------------
 
-/// `GET /portal`: a tenant admin's own business — members, directory entry,
-/// billing hook.
+/// The tenant admin portal: an overview dashboard at `/portal` plus feature
+/// pages for shop, media, members and settings. A tenant admin's own
+/// business: its products, its library, its users, its directory entry.
+
+/// Secondary nav shared by every portal page.
+#[component]
+async fn portal_tabs(active: &str) -> Result {
+    view! {
+        <nav class="mb-8 flex flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-900/60 p-1 text-sm">
+            for &(href, label) in PORTAL_SECTIONS {
+                <a
+                    href=(href)
+                    class=(
+                        if active == href {
+                            "rounded-lg bg-zinc-800 px-3 py-1.5 font-semibold text-zinc-100"
+                        } else {
+                            "rounded-lg px-3 py-1.5 text-zinc-400 transition hover:text-zinc-100"
+                        }
+                    )
+                >
+                    (label)
+                </a>
+            }
+        </nav>
+    }
+}
+
+/// `GET /portal`: the tenant admin's overview — counts and entry points.
 #[page("/portal")]
 async fn portal(cx: &Cx) -> Result {
     let auth = platform_core::auth(cx);
     let current = portal_user(cx, &auth).await?;
     let db = platform_core::db(cx);
     let tenant_id = current.user.tenant_id.unwrap_or(0);
+    let tenant = auth
+        .tenant_by_id(tenant_id)
+        .await?
+        .unwrap_or_default();
     let members = auth.users_by_tenant(tenant_id).await?;
+    let (domain_label, domain_class) = domain_pill(&tenant);
+
+    let product_count = if tenant.has_app("marketplace") {
+        let products: marketplace_app::models::ProductPage =
+            db.query(marketplace_app::models::products_by_tenant(tenant_id)?).await?;
+        products.items.len()
+    } else {
+        0
+    };
+    let media_count = if tenant.has_app("media") {
+        let library: media_app::models::MediaLibrary =
+            db.query(media_app::models::list_library_by_tenant(tenant_id)?).await?;
+        library.items.len()
+    } else {
+        0
+    };
+    let billing_flag = if tenant.billing_enabled == Some(true) { "on" } else { "off" };
+
+    view! {
+        portal_tabs(active: "/portal")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Tenant portal"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "Business: " (tenant.tenant_name.as_deref().unwrap_or("—"))
+                <span class=("ml-2 rounded-full border px-2 py-0.5 text-xs ".to_string() + domain_class)>
+                    (domain_label)
+                </span>
+            </p>
+        </div>
+
+        <section class="mb-10">
+            <div class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-4">
+                <a href="/portal/members" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(members.len())</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Members"</div>
+                </a>
+                <a href="/portal/shop" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(product_count)</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Shop products"</div>
+                </a>
+                <a href="/portal/media" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(media_count)</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Media items"</div>
+                </a>
+                <a href="/portal/settings" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(billing_flag)</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Directory & billing"</div>
+                </a>
+            </div>
+        </section>
+
+        if !tenant.is_public.unwrap_or(false) {
+            <a
+                href="/portal/settings"
+                class="mb-10 flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-300 transition hover:border-sky-400"
+            >
+                <span>"Your business is not listed in the public directory yet."</span>
+                <span class="font-semibold text-sky-400">"Directory settings →"</span>
+            </a>
+        }
+    }
+}
+
+/// `GET /portal/settings`: directory entry + billing hook.
+#[page("/portal/settings")]
+async fn portal_settings(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let current = portal_user(cx, &auth).await?;
+    let tenant_id = current.user.tenant_id.unwrap_or(0);
     let tenant = auth
         .tenant_by_id(tenant_id)
         .await?
@@ -547,8 +791,10 @@ async fn portal(cx: &Cx) -> Result {
     let (domain_label, domain_class) = domain_pill(&tenant);
 
     view! {
+        portal_tabs(active: "/portal/settings")
+
         <div class="mb-8">
-            <h1 class="text-3xl font-bold">"Tenant portal"</h1>
+            <h1 class="text-3xl font-bold">"Settings"</h1>
             <p class="mt-1 text-sm text-zinc-400">
                 "Business: " (tenant.tenant_name.as_deref().unwrap_or("—"))
                 <span class=("ml-2 rounded-full border px-2 py-0.5 text-xs ".to_string() + domain_class)>
@@ -613,9 +859,36 @@ async fn portal(cx: &Cx) -> Result {
                 </div>
             </form>
         </section>
+    }
+}
+
+/// `GET /portal/members`: the tenant's users — suspend, drop sessions, add.
+#[page("/portal/members")]
+async fn portal_members(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let current = portal_user(cx, &auth).await?;
+    let tenant_id = current.user.tenant_id.unwrap_or(0);
+    let tenant = auth
+        .tenant_by_id(tenant_id)
+        .await?
+        .unwrap_or_default();
+    let members = auth.users_by_tenant(tenant_id).await?;
+    let (domain_label, domain_class) = domain_pill(&tenant);
+
+    view! {
+        portal_tabs(active: "/portal/members")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Members"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "Business: " (tenant.tenant_name.as_deref().unwrap_or("—"))
+                <span class=("ml-2 rounded-full border px-2 py-0.5 text-xs ".to_string() + domain_class)>
+                    (domain_label)
+                </span>
+            </p>
+        </div>
 
         <section class="mb-10">
-            <h2 class="mb-3 text-xl font-semibold">"Members"</h2>
             <div class="overflow-x-auto rounded-xl border border-zinc-800">
                 <table class="w-full text-left text-sm">
                     <thead>
@@ -709,17 +982,47 @@ async fn portal(cx: &Cx) -> Result {
                 </div>
             </form>
         </section>
+    }
+}
 
-        if tenant.has_app("marketplace") {
+/// `GET /portal/shop`: the tenant's products and order tickets (Marketplace
+/// domain only).
+#[page("/portal/shop")]
+async fn portal_shop(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let current = portal_user(cx, &auth).await?;
+    let db = platform_core::db(cx);
+    let tenant_id = current.user.tenant_id.unwrap_or(0);
+    let tenant = auth
+        .tenant_by_id(tenant_id)
+        .await?
+        .unwrap_or_default();
+
+    view! {
+        portal_tabs(active: "/portal/shop")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Shop"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "Products, photos and order tickets for "
+                (tenant.tenant_name.as_deref().unwrap_or("this tenant"))
+                "."
+            </p>
+        </div>
+
+        if !tenant.has_app("marketplace") {
+            <p class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-400">
+                "The Marketplace app is not enabled for this tenant's domain."
+            </p>
+        } else {
             let products: marketplace_app::models::ProductPage =
                 db.query(marketplace_app::models::products_by_tenant(tenant_id)?).await?;
             let orders: marketplace_app::models::OrderPage =
                 db.query(marketplace_app::models::orders_by_tenant(tenant_id)?).await?;
 
             <section class="mb-10">
-                <h2 class="mb-3 text-xl font-semibold">"Shop products"</h2>
                 <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-                    <h3 class="mb-3 text-sm font-medium text-zinc-400">"Add a product"</h3>
+                    <h2 class="mb-3 text-sm font-medium text-zinc-400">"Add a product"</h2>
                     <form method="post" enctype="multipart/form-data"
                         action=("/shop-manage/".to_owned() + &tenant_id.to_string() + "/product")
                         class="flex flex-wrap items-end gap-4"
@@ -786,7 +1089,7 @@ async fn portal(cx: &Cx) -> Result {
                     </ul>
                 </div>
                 <div class="mt-4 rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-                    <h3 class="mb-3 text-sm font-medium text-zinc-400">"Orders"</h3>
+                    <h2 class="mb-3 text-sm font-medium text-zinc-400">"Orders"</h2>
                     <ul class="divide-y divide-zinc-800">
                         for order in &orders.items {
                             <li class="flex flex-wrap items-center gap-4 py-3">
@@ -826,17 +1129,47 @@ async fn portal(cx: &Cx) -> Result {
                 </div>
             </section>
         }
+    }
+}
 
-        if tenant.has_app("media") {
+/// `GET /portal/media`: the tenant's media pricing and sales queue (Media
+/// domain only).
+#[page("/portal/media")]
+async fn portal_media(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let current = portal_user(cx, &auth).await?;
+    let db = platform_core::db(cx);
+    let tenant_id = current.user.tenant_id.unwrap_or(0);
+    let tenant = auth
+        .tenant_by_id(tenant_id)
+        .await?
+        .unwrap_or_default();
+
+    view! {
+        portal_tabs(active: "/portal/media")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Media sales"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "Pricing and orders for "
+                (tenant.tenant_name.as_deref().unwrap_or("this tenant"))
+                "."
+            </p>
+        </div>
+
+        if !tenant.has_app("media") {
+            <p class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-400">
+                "The Media Library app is not enabled for this tenant's domain."
+            </p>
+        } else {
             let library: media_app::models::MediaLibrary =
                 db.query(media_app::models::list_library_by_tenant(tenant_id)?).await?;
             let media_orders: media_app::models::MediaOrderPage =
                 db.query(media_app::models::media_orders_by_tenant(tenant_id)?).await?;
 
             <section class="mb-10">
-                <h2 class="mb-3 text-xl font-semibold">"Media sales"</h2>
                 <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-                    <h3 class="mb-3 text-sm font-medium text-zinc-400">"Pricing"</h3>
+                    <h2 class="mb-3 text-sm font-medium text-zinc-400">"Pricing"</h2>
                     <ul class="divide-y divide-zinc-800">
                         for item in &library.items {
                             <li class="flex flex-wrap items-center gap-4 py-3">
@@ -868,7 +1201,7 @@ async fn portal(cx: &Cx) -> Result {
                     </ul>
                 </div>
                 <div class="mt-4 rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-                    <h3 class="mb-3 text-sm font-medium text-zinc-400">"Sales"</h3>
+                    <h2 class="mb-3 text-sm font-medium text-zinc-400">"Sales"</h2>
                     <ul class="divide-y divide-zinc-800">
                         for order in &media_orders.items {
                             <li class="flex flex-wrap items-center gap-4 py-3">
@@ -910,7 +1243,6 @@ async fn portal(cx: &Cx) -> Result {
         }
     }
 }
-
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------
@@ -922,13 +1254,13 @@ pub async fn applications_approve(
     cx: &Cx,
 ) -> Result<SeeOther> {
     let auth = platform_core::auth(cx);
-    let current = console_user(cx, &auth).await?;
+    let _current = console_user(cx, &auth).await?;
     let Ok(tenant_id) = form.tenant_id.parse() else {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other("/admin/applications"));
     };
     let quota = form.storage_quota_gib.max(1).saturating_mul(1 << 30);
     let _ = auth.approve_application(tenant_id, quota).await;
-    Ok(see_other("/admin"))
+    Ok(see_other("/admin/applications"))
 }
 
 /// `POST /admin/applications/reject`: refuse a pending application; the
@@ -939,12 +1271,12 @@ pub async fn applications_reject(
     cx: &Cx,
 ) -> Result<SeeOther> {
     let auth = platform_core::auth(cx);
-    let current = console_user(cx, &auth).await?;
+    let _current = console_user(cx, &auth).await?;
     let Ok(tenant_id) = form.tenant_id.parse() else {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other("/admin/applications"));
     };
     let _ = auth.reject_application(tenant_id).await;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other("/admin/applications"))
 }
 
 /// `POST /admin/policies/save`: the owner's per-domain onboarding policy.
@@ -954,9 +1286,9 @@ pub async fn policies_save(
     cx: &Cx,
 ) -> Result<SeeOther> {
     let auth = platform_core::auth(cx);
-    let current = console_user(cx, &auth).await?;
+    let _current = console_user(cx, &auth).await?;
     if !is_known_domain(&form.domain) {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other("/admin/policies"));
     }
     auth.save_domain_policy(
         form.domain.clone(),
@@ -964,7 +1296,7 @@ pub async fn policies_save(
         form.payment_webhook_url.clone(),
     )
     .await?;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other("/admin/policies"))
 }
 
 /// `POST /admin/users/save`: create a user (tenant admins may only create
@@ -976,7 +1308,7 @@ pub async fn users_save(Form(form): Form<SaveUserForm>, cx: &Cx) -> Result<SeeOt
 
     let role = Role::parse(&form.role);
     if role == Role::Owner && current.user.role() != Role::Owner {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other(back_after(&current, "/admin/users", "/portal/members")));
     }
     let tenant_id = match (current.user.role() == Role::Owner, form.tenant_id) {
         (true, Some(raw)) => optional_i64(Some(raw)),
@@ -998,7 +1330,7 @@ pub async fn users_save(Form(form): Form<SaveUserForm>, cx: &Cx) -> Result<SeeOt
         password,
     )
     .await?;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other(back_after(&current, "/admin/users", "/portal/members")))
 }
 
 /// `POST /admin/users/toggle`: suspend / re-activate a user.
@@ -1008,7 +1340,7 @@ pub async fn users_toggle(Form(form): Form<UserIdForm>, cx: &Cx) -> Result<SeeOt
     let current = staff(cx, &auth).await?;
 
     let Some(user_id) = form.user_id.parse().ok() else {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other(back_after(&current, "/admin/users", "/portal/members")));
     };
     let active = auth
         .users()
@@ -1017,7 +1349,7 @@ pub async fn users_toggle(Form(form): Form<UserIdForm>, cx: &Cx) -> Result<SeeOt
         .find(|view| view.user.user_id == Some(user_id))
         .is_some_and(|view| view.is_active);
     auth.set_user_active(user_id, !active).await?;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other(back_after(&current, "/admin/users", "/portal/members")))
 }
 
 /// `POST /admin/users/drop`: kill every session of a user (MikroTik-style).
@@ -1026,10 +1358,10 @@ pub async fn users_drop(Form(form): Form<UserIdForm>, cx: &Cx) -> Result<SeeOthe
     let auth = platform_core::auth(cx);
     let current = staff(cx, &auth).await?;
     let Some(user_id) = form.user_id.parse().ok() else {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other(back_after(&current, "/admin/users", "/portal/members")));
     };
     auth.force_drop_user(user_id).await?;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other(back_after(&current, "/admin/users", "/portal/members")))
 }
 
 /// `POST /admin/tenants/save`: update an established tenant (owner only).
@@ -1038,11 +1370,11 @@ pub async fn tenants_save(Form(form): Form<SaveTenantForm>, cx: &Cx) -> Result<S
     let auth = platform_core::auth(cx);
     let current = staff(cx, &auth).await?;
     if current.user.role() != Role::Owner {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")));
     }
     let Some(tenant_id) = optional_i64(form.tenant_id) else {
         // The owner never creates tenants any more — businesses apply (§4a).
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")));
     };
     let quota = form.storage_quota_gib.unwrap_or(0).saturating_mul(1 << 30);
     let apps_enabled = form
@@ -1061,7 +1393,7 @@ pub async fn tenants_save(Form(form): Form<SaveTenantForm>, cx: &Cx) -> Result<S
     .await?;
     auth.set_tenant_visibility(tenant_id, form.is_public.is_some(), form.tagline.clone())
         .await?;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")))
 }
 
 /// `POST /admin/tenant/billing`: the tenant admin's own billing hook.
@@ -1078,7 +1410,7 @@ pub async fn tenant_billing(
         (false, None) => None,
     };
     let Some(tenant_id) = tenant_id else {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")));
     };
     auth.set_tenant_billing(
         tenant_id,
@@ -1086,7 +1418,7 @@ pub async fn tenant_billing(
         form.auth_webhook_url.clone(),
     )
     .await?;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")))
 }
 
 /// `POST /admin/tenant/visibility`: a tenant admin (or the owner) toggles
@@ -1104,11 +1436,11 @@ pub async fn tenant_visibility(
         (false, None) => None,
     };
     let Some(tenant_id) = tenant_id else {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")));
     };
     auth.set_tenant_visibility(tenant_id, form.is_public.is_some(), form.tagline.clone())
         .await?;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")))
 }
 
 /// `POST /admin/tenants/toggle`: suspend / re-activate a tenant (owner only).
@@ -1120,7 +1452,7 @@ pub async fn tenants_toggle(
     let auth = platform_core::auth(cx);
     let current = console_user(cx, &auth).await?;
     let Some(tenant_id) = form.tenant_id.parse().ok() else {
-        return Ok(see_other(home_for(&current)));
+        return Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")));
     };
     let active = auth
         .tenants()
@@ -1129,7 +1461,7 @@ pub async fn tenants_toggle(
         .find(|tenant| tenant.tenant_id == Some(tenant_id))
         .is_some_and(|tenant| tenant.is_active());
     auth.set_tenant_active(tenant_id, !active).await?;
-    Ok(see_other(home_for(&current)))
+    Ok(see_other(back_after(&current, "/admin/tenants", "/portal/settings")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,6 +1471,24 @@ pub async fn tenants_toggle(
 const DOMAINS: &[(&str, &str)] = &[
     ("media", "Media Library"),
     ("marketplace", "Marketplace"),
+];
+
+/// Owner console sections (tab order).
+const CONSOLE_SECTIONS: &[(&str, &str)] = &[
+    ("/admin", "Overview"),
+    ("/admin/applications", "Applications"),
+    ("/admin/tenants", "Tenants"),
+    ("/admin/policies", "Policies"),
+    ("/admin/users", "Users"),
+];
+
+/// Tenant portal sections (tab order).
+const PORTAL_SECTIONS: &[(&str, &str)] = &[
+    ("/portal", "Overview"),
+    ("/portal/shop", "Shop"),
+    ("/portal/media", "Media"),
+    ("/portal/members", "Members"),
+    ("/portal/settings", "Settings"),
 ];
 
 fn is_known_domain(domain: &str) -> bool {
