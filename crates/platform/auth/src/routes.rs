@@ -9,7 +9,7 @@ use serde::Deserialize;
 use topcoat::{
     Result,
     context::{app_context, Cx},
-    router::{content::Form, error::{see_other, SeeOther}, parse_query_params, route},
+    router::{content::Form, error::{see_other, SeeOther}, parse_query_params, page, route},
     view::view,
 };
 
@@ -30,7 +30,7 @@ pub struct LoginQuery {
 }
 
 /// `GET /login`: the sign-in page (fragment; shell comes from the layout).
-#[route(GET "/login")]
+#[page("/login")]
 pub async fn login_page(cx: &Cx) -> Result {
     let failed = parse_query_params::<LoginQuery>(cx)
         .map(|query| query.error)

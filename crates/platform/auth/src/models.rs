@@ -16,6 +16,7 @@ pub const PAYMENT_STATUS_DECLINED: &str = "declined";
 pub const DOMAINS: &[(&str, &str)] = &[
     ("media", "Media Library"),
     ("marketplace", "Marketplace"),
+    ("serverless", "Serverless Space"),
 ];
 
 pub const ROLE_OWNER: &str = "owner";

@@ -16,6 +16,20 @@ use topcoat::{
 /// Node). Inlined so the runtime needs no asset bundler.
 const TAILWIND_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/tailwind.css"));
 
+/// Mobile-first global overrides on top of the compiled Tailwind CSS.
+const GLOBAL_CSS: &str = r#"
+img, video { max-width: 100%; height: auto; }
+#main-content { min-width: 0; }
+header { flex-wrap: wrap; }
+header nav { flex-wrap: wrap; gap: 0.75rem; }
+@media (max-width: 640px) {
+    header { gap: 0.5rem; padding-top: 0.75rem; padding-bottom: 0.75rem; }
+    header nav { gap: 0.625rem; }
+    header .ml-auto { margin-left: 0; width: 100%; }
+    h1 { font-size: 1.5rem !important; }
+}
+"#;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -46,6 +60,7 @@ async fn main() -> Result<()> {
     registry.push(onboarding_app::Onboarding);
     registry.push(admin_app::Console);
     registry.push(agent_app::Agent);
+    registry.push(serverless_app::Serverless);
 
     topcoat::start(
         Router::builder()
@@ -53,6 +68,7 @@ async fn main() -> Result<()> {
             .app_context(services)
             .app_context(auth)
             .app_context(registry)
+            .app_context(serverless_app::store::TursoStore::new())
             .cookies()
             .sessions(
                 topcoat::session::SessionConfig::builder()
@@ -61,6 +77,7 @@ async fn main() -> Result<()> {
             )
             .layer(BodyLimit::max(8 * 1024 * 1024 * 1024).at("/media-library/upload"))
             .layer(BodyLimit::max(64 * 1024 * 1024).at("/shop-manage"))
+            .layer(BodyLimit::max(256 * 1024 * 1024).at("/sl"))
             .build(),
     )
     .await?;
@@ -91,11 +108,19 @@ async fn root(cx: &Cx, slot: Result) -> Result {
     };
     let has_media = tenant.as_ref().is_some_and(|t| t.has_app("media"));
     let has_marketplace = tenant.as_ref().is_some_and(|t| t.has_app("marketplace"));
+    let has_serverless = tenant.as_ref().is_some_and(|t| t.has_app("serverless"));
     let tenant_href = |current: Option<&platform_core::CurrentUser>| -> String {
         current
             .and_then(|c| c.user.tenant_id)
             .filter(|id| *id > 0)
             .map(|id| format!("/shop/{id}"))
+            .unwrap_or_else(|| "/public".to_string())
+    };
+    let spaces_href = |current: Option<&platform_core::CurrentUser>| -> String {
+        current
+            .and_then(|c| c.user.tenant_id)
+            .filter(|id| *id > 0)
+            .map(|id| format!("/spaces/{id}"))
             .unwrap_or_else(|| "/public".to_string())
     };
 
@@ -105,13 +130,13 @@ async fn root(cx: &Cx, slot: Result) -> Result {
             <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>"LANsystem"</title>
+                <title>"LocoNet"</title>
                 <style>(TAILWIND_CSS)</style>
+                <style>(GLOBAL_CSS)</style>
                 <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js"></script>
             </head>
             <body
                 class="min-h-screen bg-zinc-950 text-zinc-100 antialiased"
-                hx-boost="true"
             >
                 <div class="mx-auto max-w-5xl px-5 pb-16">
                     <header
@@ -147,7 +172,7 @@ Some(_) if on_console => {
                             },
                             Some(_) => {
                                 <a class="text-lg font-bold text-zinc-100" href="/">
-                                    "LANsystem"
+                                    "LocoNet"
                                 </a>
                                 <nav class="flex gap-4 text-sm text-zinc-400">
                                     <a class="hover:text-zinc-100" href="/public">"Directory"</a>
@@ -156,6 +181,9 @@ Some(_) if on_console => {
                                     }
                                     if has_marketplace {
                                         <a class="hover:text-zinc-100" href=(tenant_href(current.as_ref()))>"Shop"</a>
+                                    }
+                                    if has_serverless {
+                                        <a class="hover:text-zinc-100" href=(spaces_href(current.as_ref()))>"Spaces"</a>
                                     }
                                     match current.as_ref().map(|c| c.user.role()) {
                                         Some(Role::Owner) => {
@@ -188,7 +216,7 @@ Some(_) if on_console => {
                             <footer
                                 class="mt-14 border-t border-zinc-800 pt-4 text-xs text-zinc-500"
                             >
-                                "LANsystem · a private server on your LAN."
+                                "LocoNet · a private server on your local network."
                             </footer>
                         },
                         None => {},

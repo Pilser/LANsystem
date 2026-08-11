@@ -31,6 +31,7 @@ async fn blob(cx: &Cx) -> Result<topcoat::router::response::Response> {
             key.starts_with("shop/")
                 || key.starts_with("media/")
                 || key.starts_with("profile/")
+                || key.starts_with("srv/")
         })
         .ok_or_else(|| topcoat::Error::from(redirect("/public")))?;
     let Some(bytes) = storage.get_bytes(&key).await? else {

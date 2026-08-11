@@ -1,0 +1,30 @@
+[package]
+name = "serverless-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Serverless boards: per-tenant record stores backed by a local turso SQL engine"
+
+[dependencies]
+db = { path = "../../db" }
+helix-db = { workspace = true }
+serverless-core = { path = "../../serverless-core" }
+platform-core = { path = "../../platform/core" }
+platform-auth = { path = "../../platform/auth" }
+storage = { path = "../../storage" }
+app-contract = { path = "../app-contract" }
+turso = { workspace = true }
+topcoat = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }
+async-trait = "0.1"
+
+[lints]
+workspace = true

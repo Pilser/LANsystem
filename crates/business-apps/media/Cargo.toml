@@ -16,6 +16,7 @@ platform-core = { path = "../../platform/core" }
 db = { path = "../../db" }
 storage = { path = "../../storage" }
 marketplace-app = { path = "../marketplace" }
+serverless-app = { path = "../serverless" }
 helix-db = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

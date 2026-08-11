@@ -383,6 +383,7 @@ async fn tenants(cx: &Cx) -> Result {
         let domain_ok = match want_domain {
             Some("media") => tenant.has_app("media"),
             Some("marketplace") => tenant.has_app("marketplace"),
+            Some("serverless") => tenant.has_app("serverless"),
             _ => true,
         };
         let status_ok = match want_status {
@@ -628,6 +629,71 @@ async fn tenants(cx: &Cx) -> Result {
     }
 }
 
+/// `GET /admin/serverless`: the owner's spaces feature page — every space
+/// across tenants with the same manage cards the portal shows.
+#[page("/admin/serverless")]
+async fn console_serverless(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let _current = console_user(cx, &auth).await?;
+    let db = platform_core::db(cx);
+    let spaces: serverless_app::models::BoardPage = db
+        .query(serverless_app::models::boards_all()?)
+        .await?;
+    let counts = serverless_app::components::board_record_counts(cx, &spaces.items).await;
+
+    view! {
+        console_tabs(active: "/admin/serverless")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Spaces"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "Every serverless space on the platform — create, upload builds,
+                deploy, publish and manage media from here."
+            </p>
+        </div>
+
+        <section class="mb-10">
+            <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+                <h2 class="mb-3 text-sm font-medium text-zinc-400">"Create a space"</h2>
+                <form method="post" action="/sl/boards/create"
+                    class="flex flex-wrap items-end gap-4"
+                >
+                    <label class="flex flex-col gap-1 text-sm">
+                        "Title"
+                        <input name="title" required=""
+                            class="w-48 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                    </label>
+                    <label class="flex flex-col gap-1 text-sm">
+                        "Description"
+                        <input name="description"
+                            class="w-64 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                    </label>
+                    <button
+                        class="cursor-pointer rounded-md bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-500"
+                    >
+                        "Create"
+                    </button>
+                </form>
+            </div>
+
+            <div class="mt-8">
+                <h2 class="mb-3 text-lg font-semibold">"All spaces"</h2>
+                if spaces.items.is_empty() {
+                    <p class="py-6 text-sm text-zinc-400">
+                        "No spaces yet — create the first one above."
+                    </p>
+                } else {
+                    <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                        for space in &spaces.items {
+                            serverless_app::components::space_manage_card(space: space, counts: &counts)
+                        }
+                    </ul>
+                }
+            </div>
+        </section>
+    }
+}
+
 /// `GET /admin/policies`: the owner's per-domain onboarding policies.
 #[page("/admin/policies")]
 async fn policies(cx: &Cx) -> Result {
@@ -783,6 +849,9 @@ async fn portal_tabs(active: &str, cx: &Cx) -> Result {
     if tenant.as_ref().is_some_and(|t| t.has_app("marketplace")) {
         sections.push(("/portal/shop", "Shop"));
     }
+    if tenant.as_ref().is_some_and(|t| t.has_app("serverless")) {
+        sections.push(("/portal/serverless", "Server"));
+    }
     if tenant.as_ref().is_some_and(|t| t.has_app("media")) {
         sections.push(("/portal/media", "Media"));
     }
@@ -836,6 +905,13 @@ async fn portal(cx: &Cx) -> Result {
     } else {
         0
     };
+    let space_count = if tenant.has_app("serverless") {
+        let spaces: serverless_app::models::BoardPage =
+            db.query(serverless_app::models::boards_by_tenant(tenant_id)?).await?;
+        spaces.items.len()
+    } else {
+        0
+    };
     let billing_flag = if tenant.billing_enabled == Some(true) { "on" } else { "off" };
 
     view! {
@@ -852,19 +928,27 @@ async fn portal(cx: &Cx) -> Result {
         </div>
 
         <section class="mb-10">
-            <div class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-4">
+            <div class="grid list-none grid-cols-2 gap-4 p-0 sm:grid-cols-3 xl:grid-cols-5">
                 <a href="/portal/members" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
                     <div class="text-2xl font-bold text-zinc-100">(members.len())</div>
                     <div class="mt-1 text-sm text-zinc-400">"Members"</div>
                 </a>
-                <a href="/portal/shop" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
-                    <div class="text-2xl font-bold text-zinc-100">(product_count)</div>
-                    <div class="mt-1 text-sm text-zinc-400">"Shop products"</div>
+                if tenant.has_app("marketplace") {
+                    <a href="/portal/shop" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                        <div class="text-2xl font-bold text-zinc-100">(product_count)</div>
+                        <div class="mt-1 text-sm text-zinc-400">"Shop products"</div>
+                    </a>
+                }
+                <a href="/portal/serverless" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                    <div class="text-2xl font-bold text-zinc-100">(space_count)</div>
+                    <div class="mt-1 text-sm text-zinc-400">"Server spaces"</div>
                 </a>
-                <a href="/portal/media" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
-                    <div class="text-2xl font-bold text-zinc-100">(media_count)</div>
-                    <div class="mt-1 text-sm text-zinc-400">"Media items"</div>
-                </a>
+                if tenant.has_app("media") {
+                    <a href="/portal/media" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
+                        <div class="text-2xl font-bold text-zinc-100">(media_count)</div>
+                        <div class="mt-1 text-sm text-zinc-400">"Media items"</div>
+                    </a>
+                }
                 <a href="/portal/settings" class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition hover:border-sky-400">
                     <div class="text-2xl font-bold text-zinc-100">(billing_flag)</div>
                     <div class="mt-1 text-sm text-zinc-400">"Directory & billing"</div>
@@ -1349,6 +1433,100 @@ async fn portal_shop(cx: &Cx) -> Result {
                             </li>
                         }
                     </ul>
+                </div>
+            </section>
+        }
+    }
+}
+
+/// `GET /portal/serverless`: the tenant's spaces (Serverless domain only) —
+/// create form + manage cards, marketplace-style.
+#[page("/portal/serverless")]
+async fn portal_serverless(cx: &Cx) -> Result {
+    let auth = platform_core::auth(cx);
+    let current = portal_user(cx, &auth).await?;
+    let db = platform_core::db(cx);
+    let tenant_id = current.user.tenant_id.unwrap_or(0);
+    let tenant = auth
+        .tenant_by_id(tenant_id)
+        .await?
+        .unwrap_or_default();
+
+    view! {
+        portal_tabs(active: "/portal/serverless")
+
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold">"Server console"</h1>
+            <p class="mt-1 text-sm text-zinc-400">
+                "Every space is one workspace with its own app build and its own
+                public card (icon, banner, gallery) in the feed. Upload a built
+                "
+                <code class="text-zinc-300">"dist/"</code>
+                ", preview it, then deploy — create as many spaces as "
+                (tenant.tenant_name.as_deref().unwrap_or("this tenant"))
+                " needs."
+            </p>
+        </div>
+
+        if !tenant.has_app("serverless") {
+            <p class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-400">
+                "The Server app is not enabled for this tenant's domain."
+            </p>
+        } else {
+            let spaces: serverless_app::models::BoardPage =
+                db.query(serverless_app::models::boards_by_tenant(tenant_id)?).await?;
+            let counts = serverless_app::components::board_record_counts(cx, &spaces.items).await;
+
+            <section class="mb-10">
+                <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+                    <h2 class="mb-3 text-sm font-medium text-zinc-400">"Create a space"</h2>
+                    <form method="post" action="/sl/boards/create"
+                        class="flex flex-wrap items-end gap-4"
+                    >
+                        <label class="flex flex-col gap-1 text-sm">
+                            "Title"
+                            <input name="title" required=""
+                                class="w-48 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                        </label>
+                        <label class="flex flex-col gap-1 text-sm">
+                            "Description"
+                            <input name="description"
+                                class="w-64 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                        </label>
+                        <label class="flex flex-col gap-1 text-sm">
+                            "Upsert key property (optional)"
+                            <input name="unique_key"
+                                class="w-40 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm outline-none focus:border-sky-400" />
+                        </label>
+                        <label class="flex h-8 items-center gap-2 text-sm">
+                            <input type="checkbox" name="public_reads" value="true" class="h-4 w-4 accent-sky-500" />
+                            "Public reads (no key needed)"
+                        </label>
+                        <button
+                            class="cursor-pointer rounded-md bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-sky-500"
+                        >
+                            "Create"
+                        </button>
+                    </form>
+                    <p class="mt-2 text-xs text-zinc-500">
+                        "The one-time owner key appears on the space page — copy it into your MCP client
+                        (header x-srv-key) to manage the space and deploy from the tool."
+                    </p>
+                </div>
+
+                <div class="mt-8">
+                    <h2 class="mb-3 text-lg font-semibold">"Spaces"</h2>
+                    if spaces.items.is_empty() {
+                        <p class="py-6 text-sm text-zinc-400">
+                            "No spaces yet — create the first one above."
+                        </p>
+                    } else {
+                        <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                            for space in &spaces.items {
+                                serverless_app::components::space_manage_card(space: space, counts: &counts)
+                            }
+                        </ul>
+                    }
                 </div>
             </section>
         }
@@ -1865,6 +2043,7 @@ pub async fn tenants_toggle(
 const DOMAINS: &[(&str, &str)] = &[
     ("media", "Media Library"),
     ("marketplace", "Marketplace"),
+    ("serverless", "Server Space"),
 ];
 
 /// Owner console sections (tab order).
@@ -1872,6 +2051,7 @@ const CONSOLE_SECTIONS: &[(&str, &str)] = &[
     ("/admin", "Overview"),
     ("/admin/applications", "Applications"),
     ("/admin/tenants", "Tenants"),
+    ("/admin/serverless", "Spaces"),
     ("/admin/policies", "Policies"),
     ("/admin/users", "Users"),
 ];
@@ -1887,6 +2067,7 @@ fn domain_pill(tenant: &Tenant) -> (&'static str, &'static str) {
     match tenant.apps_enabled.as_deref().and_then(|apps| apps.first().map(String::as_str)) {
         Some("marketplace") => ("Marketplace", "border-sky-700 bg-sky-900/40 text-sky-200"),
         Some("media") => ("Media", "border-emerald-900 bg-emerald-950/60 text-emerald-300"),
+        Some("serverless") => ("Spaces", "border-violet-800 bg-violet-950/50 text-violet-300"),
         _ => ("No domain", "border-zinc-700 bg-zinc-800 text-zinc-400"),
     }
 }

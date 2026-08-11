@@ -19,6 +19,7 @@ use topcoat::{
 
 use crate::{components, models};
 use marketplace_app::models as shop_models;
+use serverless_app::models as srv_models;
 
 /// The `id` segment captured by `/media-library/{id}`, read as the raw `str`.
 path_param!(id);
@@ -126,21 +127,117 @@ async fn media_home(cx: &Cx) -> Result {
     }
 }
 
-/// The `/media-library/upload` page: title + file, posted as multipart.
+/// One entry in the mixed public feed: a deployed app or a business card.
+struct FeedApp {
+    created_at: i64,
+    title: String,
+    initial: char,
+    icon_key: Option<String>,
+    banner_key: Option<String>,
+    gallery: Vec<String>,
+    tenant_name: String,
+    description: String,
+    open_url: String,
+}
+
+/// One business entry in the mixed public feed.
+struct FeedBusiness {
+    created_at: i64,
+    tenant_id: i64,
+    name: String,
+    initial: char,
+    description: String,
+    banner_url: Option<String>,
+    avatar_url: Option<String>,
+    gallery_urls: Vec<String>,
+    has_media: bool,
+    has_marketplace: bool,
+    has_server: bool,
+}
+
+enum FeedCard {
+    App(FeedApp),
+    Business(FeedBusiness),
+}
+
 /// The public tenant feed (the LAN landing page): no login required. Renders
-/// only the tenants that opted in — no content previews, no headers.
+/// deployed apps and opted-in businesses in one oldest-first feed.
 #[page("/public")]
 async fn public_directory(cx: &Cx) -> Result {
     let auth = platform_core::auth(cx);
     let tenants = auth.public_tenants().await?;
     let signed_out = auth.current_user(cx).await?.is_none();
+    let db = platform_core::db(cx);
+    let spaces: srv_models::BoardPage = db.query(srv_models::spaces_all()?).await?;
+
+    let mut cards: Vec<(i64, FeedCard)> = Vec::with_capacity(spaces.items.len() + tenants.len());
+    for space in &spaces.items {
+        let title = space.board_title.clone().unwrap_or_default();
+        let tenant_name = tenants
+            .iter()
+            .find(|t| t.tenant_id == space.tenant_id)
+            .and_then(|t| t.tenant_name.clone())
+            .unwrap_or_default();
+        cards.push((
+            space.board_created_at.unwrap_or(0),
+            FeedCard::App(FeedApp {
+                created_at: space.board_created_at.unwrap_or(0),
+                title: title.clone(),
+                initial: title.chars().next().unwrap_or('?'),
+                icon_key: space.board_icon_key.as_deref().filter(|k| !k.is_empty()).map(str::to_owned),
+                banner_key: space.board_banner_key.as_deref().filter(|k| !k.is_empty()).map(str::to_owned),
+                gallery: space
+                    .board_gallery_keys
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok())
+                    .unwrap_or_default(),
+                tenant_name,
+                description: space.board_description.clone().unwrap_or_default(),
+                open_url: "/s/".to_owned() + space.board_id.as_deref().unwrap_or_default(),
+            }),
+        ));
+    }
+    for tenant in &tenants {
+        let tenant_id = tenant.tenant_id.unwrap_or(0);
+        cards.push((
+            tenant.created_at.unwrap_or(0),
+            FeedCard::Business(FeedBusiness {
+                created_at: tenant.created_at.unwrap_or(0),
+                tenant_id,
+                name: tenant.tenant_name.clone().unwrap_or_default(),
+                initial: tenant
+                    .tenant_name
+                    .as_deref()
+                    .and_then(|n| n.chars().next())
+                    .unwrap_or('?'),
+                description: tenant
+                    .description
+                    .clone()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "A service on this local network".to_string()),
+                banner_url: tenant.banner_key.as_deref().filter(|k| !k.is_empty()).map(blob_url),
+                avatar_url: tenant.avatar_key.as_deref().filter(|k| !k.is_empty()).map(blob_url),
+                gallery_urls: tenant
+                    .gallery()
+                    .into_iter()
+                    .filter(|k| !k.is_empty())
+                    .take(3)
+                    .map(|k| blob_url(&k))
+                    .collect(),
+                has_media: tenant.has_app("media"),
+                has_marketplace: tenant.has_app("marketplace"),
+                has_server: tenant.has_app("serverless"),
+            }),
+        ));
+    }
+    cards.sort_by_key(|(created_at, _)| *created_at);
 
     view! {
         <div class="mb-6 flex items-start justify-between gap-4">
             <div>
-                <h1 class="text-2xl font-bold">"Public directory"</h1>
+                <h1 class="text-2xl font-bold">"LocoNet"</h1>
                 <p class="mt-1 text-sm text-zinc-400">
-                    "Services running on this LAN."
+                    "Services on this local network."
                 </p>
             </div>
             if signed_out {
@@ -152,69 +249,145 @@ async fn public_directory(cx: &Cx) -> Result {
                 </a>
             }
         </div>
-        if tenants.is_empty() {
+        if cards.is_empty() {
             <p class="py-10 text-sm text-zinc-400">
                 "Nothing listed yet — tenant admins open their tenant from the Console."
             </p>
         } else {
             <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
-                for tenant in &tenants {
-                    let banner_url = tenant.banner_key.as_deref().filter(|k| !k.is_empty()).map(blob_url);
-                    let avatar_url = tenant.avatar_key.as_deref().filter(|k| !k.is_empty()).map(blob_url);
-                    let gallery_urls: Vec<String> = tenant.gallery().into_iter()
-                        .filter(|k| !k.is_empty()).take(3).map(|k| blob_url(&k)).collect();
-                    <li>
-                        <a
-                            class="block overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 transition hover:-translate-y-0.5 hover:border-emerald-500"
-                            href=("/tenant/".to_owned() + tenant.tenant_id.map(|id| id.to_string()).as_deref().unwrap_or("0"))
-                        >
-                            <div class="relative h-28 w-full bg-zinc-950">
-                                if let Some(url) = &banner_url {
-                                    <img src=(url) alt="" class="h-28 w-full object-cover" />
-                                } else {
-                                    <div class="flex h-28 w-full items-center justify-center text-xs text-zinc-600">
-                                        "Business"
-                                    </div>
-                                }
-                                <div class="absolute -bottom-0 left-4 h-16 w-16 rounded-full border-2 border-zinc-900 bg-zinc-800">
-                                    if let Some(url) = &avatar_url {
-                                        <img src=(url) alt="" class="h-full w-full rounded-full object-cover" />
-                                    } else {
-                                        <div class="flex h-full w-full items-center justify-center rounded-full bg-zinc-800 text-lg text-zinc-500">
-                                            (tenant.tenant_name.as_deref().and_then(|n| n.chars().next()).unwrap_or('?'))
+                for (_, card) in &cards {
+                    match card {
+                        FeedCard::App(app) => {
+                            <li>
+                                <a
+                                    class="block overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 transition hover:-translate-y-0.5 hover:border-sky-400"
+                                    href=(app.open_url.clone())
+                                >
+                                    match &app.banner_key {
+                                        Some(key) => {
+                                            <img class="aspect-video w-full bg-zinc-800 object-cover" src=(blob_url(key))
+                                                alt=(app.title.clone()) />
+                                        },
+                                        None => {
+                                            <div class="flex aspect-video w-full items-center justify-center bg-zinc-800 text-sm text-zinc-600">
+                                                "App"
+                                            </div>
+                                        },
+                                    }
+                                    if app.gallery.len() > 1 {
+                                        <div class="flex gap-1 px-4 pt-3">
+                                            for key in app.gallery.iter().skip(1).take(8) {
+                                                <img class="h-10 w-10 rounded border border-zinc-800 bg-zinc-800 object-cover"
+                                                    src=(blob_url(key))
+                                                    alt="" loading="lazy" />
+                                            }
+                                            if app.gallery.len() > 9 {
+                                                <span class="flex h-10 w-10 items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-xs text-zinc-400">
+                                                    "+9"
+                                                </span>
+                                            }
                                         </div>
                                     }
-                                </div>
-                            </div>
-                            <div class="px-4 pb-4 pt-6">
-                                <div class="flex flex-wrap items-center gap-2">
-                                    <div class="text-lg font-semibold text-zinc-100">
-                                        (tenant.tenant_name.as_deref().unwrap_or("—"))
+                                    <div class="flex flex-1 flex-col p-4">
+                                        <div class="flex items-start gap-3">
+                                            match &app.icon_key {
+                                                Some(key) => {
+                                                    <img class="h-10 w-10 shrink-0 rounded-lg border border-zinc-700 bg-zinc-800 object-cover"
+                                                        src=(blob_url(key))
+                                                        alt=(app.title.clone()) />
+                                                },
+                                                None => {
+                                                    <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-800 text-base text-zinc-500">
+                                                        (app.initial)
+                                                    </div>
+                                                },
+                                            }
+                                            <div class="min-w-0 flex-1">
+                                                <div class="flex items-center gap-2">
+                                                    <div class="truncate text-base font-semibold text-zinc-100">
+                                                        (app.title.clone())
+                                                    </div>
+                                                    <span class="shrink-0 rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                                                        "LIVE"
+                                                    </span>
+                                                </div>
+                                                if !app.tenant_name.is_empty() {
+                                                    <div class="mt-0.5 text-xs text-zinc-500">(app.tenant_name.clone())</div>
+                                                }
+                                                <p class="mt-1 text-sm text-zinc-400">
+                                                    (app.description.clone())
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <span
+                                            class="mt-3 inline-block rounded-md bg-sky-600 px-3 py-1 text-xs font-semibold text-white"
+                                        >
+                                            "Open app"
+                                        </span>
                                     </div>
-                                    if tenant.has_app("media") {
-                                        <span class="rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-xs font-semibold text-emerald-300">
-                                            "Media"
-                                        </span>
-                                    }
-                                    if tenant.has_app("marketplace") {
-                                        <span class="rounded-full border border-sky-700 bg-sky-900/40 px-2 py-0.5 text-xs font-semibold text-sky-200">
-                                            "Marketplace"
-                                        </span>
-                                    }
-                                </div>
-                                <p class="mt-1 text-sm text-zinc-400">
-                                    (tenant.description.as_deref().filter(|t| !t.is_empty()).unwrap_or("A service running on this LAN"))
-                                </p>
-                                if !gallery_urls.is_empty() {
-                                    <div class="mt-3 flex gap-2">
-                                        for url in &gallery_urls {
-                                            <img src=(url) alt="" class="h-14 w-20 rounded-md border border-zinc-800 object-cover" />
+                                </a>
+                            </li>
+                        },
+                        FeedCard::Business(biz) => {
+                            <li>
+                                <a
+                                    class="block overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 transition hover:-translate-y-0.5 hover:border-emerald-500"
+                                    href=("/tenant/".to_owned() + &biz.tenant_id.to_string())
+                                >
+                                    <div class="relative h-28 w-full bg-zinc-950">
+                                        if let Some(url) = &biz.banner_url {
+                                            <img src=(url) alt="" class="h-28 w-full object-cover" />
+                                        } else {
+                                            <div class="flex h-28 w-full items-center justify-center text-xs text-zinc-600">
+                                                "Business"
+                                            </div>
+                                        }
+                                        <div class="absolute -bottom-0 left-4 h-16 w-16 rounded-full border-2 border-zinc-900 bg-zinc-800">
+                                            if let Some(url) = &biz.avatar_url {
+                                                <img src=(url) alt="" class="h-full w-full rounded-full object-cover" />
+                                            } else {
+                                                <div class="flex h-full w-full items-center justify-center rounded-full bg-zinc-800 text-lg text-zinc-500">
+                                                    (biz.initial)
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+                                    <div class="px-4 pb-4 pt-6">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <div class="text-lg font-semibold text-zinc-100">
+                                                (biz.name.clone())
+                                            </div>
+                                            if biz.has_media {
+                                                <span class="rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-xs font-semibold text-emerald-300">
+                                                    "Media"
+                                                </span>
+                                            }
+                                            if biz.has_marketplace {
+                                                <span class="rounded-full border border-sky-700 bg-sky-900/40 px-2 py-0.5 text-xs font-semibold text-sky-200">
+                                                    "Marketplace"
+                                                </span>
+                                            }
+                                            if biz.has_server {
+                                                <span class="rounded-full border border-violet-800 bg-violet-950/50 px-2 py-0.5 text-xs font-semibold text-violet-300">
+                                                    "Server"
+                                                </span>
+                                            }
+                                        </div>
+                                        <p class="mt-1 text-sm text-zinc-400">
+                                            (biz.description.clone())
+                                        </p>
+                                        if !biz.gallery_urls.is_empty() {
+                                            <div class="mt-3 flex gap-2">
+                                                for url in &biz.gallery_urls {
+                                                    <img src=(url) alt="" class="h-14 w-20 rounded-md border border-zinc-800 object-cover" />
+                                                }
+                                            </div>
                                         }
                                     </div>
-                                }
-                            </div>
-                        </a>
-                    </li>
+                                </a>
+                            </li>
+                        },
+                    }
                 }
             </ul>
         }
@@ -377,27 +550,126 @@ async fn tenant_space(cx: &Cx) -> Result {
                 }
             </section>
         }
-        if library.items.is_empty() {
-            <p class="py-10 text-sm text-zinc-400">
-                "Nothing open to guests yet."
-            </p>
-        } else {
-            <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
-                for item in &library.items {
-                    <li class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
-                        match item.stream_key.as_deref() {
-                            Some(key) => {
-                                let src = "/blob/".to_owned() + &platform_core::encode_key(key);
-                                <video
-                                    class="aspect-video w-full bg-black object-cover"
-                                    src=(src)
-                                    controls=""
-                                ></video>
-                            },
-                            None => { <div class="aspect-video w-full bg-zinc-800" /> },
+        if tenant.has_app("serverless") {
+            let spaces: srv_models::BoardPage = db
+                .query(srv_models::spaces_by_tenant(tenant_id)?)
+                .await?;
+            if !spaces.items.is_empty() {
+                <section class="mb-8">
+                    <div class="mb-3 flex items-baseline gap-3">
+                        <h2 class="text-lg font-semibold">"App"</h2>
+                        <a class="ml-auto text-xs text-sky-400 hover:text-sky-300"
+                            href=("/spaces/".to_owned() + &tenant_id.to_string())>
+                            "View all →"
+                        </a>
+                    </div>
+                    <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                        for space in &spaces.items {
+                            let title = space.board_title.clone().unwrap_or_default();
+                            let initial = title.chars().next().unwrap_or('?');
+                            let icon_key = space.board_icon_key.as_deref().filter(|k| !k.is_empty());
+                            let banner_key = space.board_banner_key.as_deref().filter(|k| !k.is_empty());
+                            let gallery: Vec<String> = space
+                                .board_gallery_keys
+                                .as_deref()
+                                .and_then(|json| serde_json::from_str(json).ok())
+                                .unwrap_or_default();
+                            let open_url = "/s/".to_owned() + space.board_id.as_deref().unwrap_or_default();
+                            <li>
+                                <a
+                                    class="block overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 transition hover:-translate-y-0.5 hover:border-sky-400"
+                                    href=(open_url.clone())
+                                >
+                                    match banner_key {
+                                        Some(key) => {
+                                            <img class="aspect-video w-full bg-zinc-800 object-cover" src=(blob_url(key))
+                                                alt=(title.clone()) />
+                                        },
+                                        None => {
+                                            <div class="flex aspect-video w-full items-center justify-center bg-zinc-800 text-sm text-zinc-600">
+                                                "App"
+                                            </div>
+                                        },
+                                    }
+                                    if gallery.len() > 1 {
+                                        <div class="flex gap-1 px-4 pt-3">
+                                            for key in gallery.iter().skip(1).take(8) {
+                                                <img class="h-10 w-10 rounded border border-zinc-800 bg-zinc-800 object-cover"
+                                                    src=(blob_url(key))
+                                                    alt="" loading="lazy" />
+                                            }
+                                            if gallery.len() > 9 {
+                                                <span class="flex h-10 w-10 items-center justify-center rounded border border-zinc-800 bg-zinc-900 text-xs text-zinc-400">
+                                                    "+9"
+                                                </span>
+                                            }
+                                        </div>
+                                    }
+                                    <div class="flex flex-1 flex-col p-4">
+                                        <div class="flex items-start gap-3">
+                                            match icon_key {
+                                                Some(key) => {
+                                                    <img class="h-10 w-10 shrink-0 rounded-lg border border-zinc-700 bg-zinc-800 object-cover"
+                                                        src=(blob_url(key))
+                                                        alt=(title.clone()) />
+                                                },
+                                                None => {
+                                                    <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-800 text-base text-zinc-500">
+                                                        (initial)
+                                                    </div>
+                                                },
+                                            }
+                                            <div class="min-w-0 flex-1">
+                                                <div class="flex items-center gap-2">
+                                                    <div class="truncate text-base font-semibold text-zinc-100">
+                                                        (title.clone())
+                                                    </div>
+                                                    if space.board_deployed_at.is_some() {
+                                                        <span class="shrink-0 rounded-full border border-emerald-900 bg-emerald-950/60 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                                                            "LIVE"
+                                                        </span>
+                                                    }
+                                                </div>
+                                                <p class="mt-1 text-sm text-zinc-400">
+                                                    (space.board_description.clone().unwrap_or_default())
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <span
+                                            class="mt-3 inline-block rounded-md bg-sky-600 px-3 py-1 text-xs font-semibold text-white"
+                                        >
+                                            "Open app"
+                                        </span>
+                                    </div>
+                                </a>
+                            </li>
                         }
-                        <div class="p-4">
-                            <div class="text-base font-semibold text-zinc-100">
+                    </ul>
+                </section>
+            }
+        }
+        if tenant.has_app("media") {
+            if library.items.is_empty() {
+                <p class="py-10 text-sm text-zinc-400">
+                    "Nothing open to guests yet."
+                </p>
+            } else {
+                <ul class="grid list-none grid-cols-1 gap-4 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                    for item in &library.items {
+                        <li class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+                            match item.stream_key.as_deref() {
+                                Some(key) => {
+                                    let src = "/blob/".to_owned() + &platform_core::encode_key(key);
+                                    <video
+                                        class="aspect-video w-full bg-black object-cover"
+                                        src=(src)
+                                        controls=""
+                                    ></video>
+                                },
+                                None => { <div class="aspect-video w-full bg-zinc-800" /> },
+                            }
+                            <div class="p-4">
+                                <div class="text-base font-semibold text-zinc-100">
                                 (item.title.clone().unwrap_or_default())
                             </div>
                             <p class="mt-1 text-xs text-zinc-500">
@@ -407,6 +679,7 @@ async fn tenant_space(cx: &Cx) -> Result {
                     </li>
                 }
             </ul>
+            }
         }
     }
 }

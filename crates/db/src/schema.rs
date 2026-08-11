@@ -14,6 +14,7 @@ pub mod labels {
     pub const MARKETPLACE_ORDER: &str = "MarketplaceOrder";
     pub const MEDIA_ORDER: &str = "MediaOrder";
     pub const DOMAIN_POLICY: &str = "Domain";
+    pub const SERVERLESS_APP: &str = "ServerlessApp";
 }
 
 pub mod edges {
@@ -81,6 +82,29 @@ pub mod props {
     pub const PRODUCT_GALLERY: &str = "galleryKeys";
     pub const STOCK: &str = "stock";
     pub const QUANTITY: &str = "quantity";
+    /// Serverless: the board / record-store identifier (`sl-…`).
+    pub const BOARD_ID: &str = "boardId";
+    pub const BOARD_TITLE: &str = "boardTitle";
+    /// Serverless: optional JSON schema validated on insert (`{…}` string).
+    pub const BOARD_SCHEMA_JSON: &str = "boardSchemaJson";
+    /// Serverless: optional payload property that makes inserts upserts.
+    pub const BOARD_UNIQUE_KEY: &str = "boardUniqueKey";
+    /// Serverless: whether records can be read without a key.
+    pub const BOARD_PUBLIC_READS: &str = "boardPublicReads";
+    /// Serverless: salted sha256 of the owner key (salt lives in `meta.toml`).
+    pub const BOARD_OWNER_KEY_HASH: &str = "boardOwnerKeyHash";
+    pub const BOARD_CREATED_AT: &str = "boardCreatedAt";
+    /// Serverless: one-line pitch shown on the public space card.
+    pub const BOARD_DESCRIPTION: &str = "boardDescription";
+    /// Serverless: square icon shown on the public space card.
+    pub const BOARD_ICON_KEY: &str = "boardIconKey";
+    /// Serverless: wide banner shown on the public space card.
+    pub const BOARD_BANNER_KEY: &str = "boardBannerKey";
+    /// Serverless: JSON array of extra gallery image keys.
+    pub const BOARD_GALLERY_KEYS: &str = "boardGalleryKeys";
+    /// Serverless: epoch millis of the last successful deploy (unset = not
+    /// deployed; the public card and `/s/{board}` only show deployed spaces).
+    pub const BOARD_DEPLOYED_AT: &str = "boardDeployedAt";
     /// Onboarding: the applicant who signed the business up (a `User` id).
     pub const APPLICANT_ID: &str = "applicantId";
     /// Onboarding payment gate: `none` / `paid` / `declined`.
@@ -250,6 +274,18 @@ ProductImageKey,
     ProductGallery,
     Stock,
     Quantity,
+    BoardId,
+    BoardTitle,
+    BoardSchemaJson,
+    BoardUniqueKey,
+    BoardPublicReads,
+    BoardOwnerKeyHash,
+    BoardCreatedAt,
+    BoardDescription,
+    BoardIconKey,
+    BoardBannerKey,
+    BoardGalleryKeys,
+    BoardDeployedAt,
     /// A property present in the database that is not part of the shared glossary.
     Unknown,
 }
@@ -303,6 +339,18 @@ impl Property {
             Self::ProductGallery => props::PRODUCT_GALLERY,
             Self::Stock => props::STOCK,
             Self::Quantity => props::QUANTITY,
+            Self::BoardId => props::BOARD_ID,
+            Self::BoardTitle => props::BOARD_TITLE,
+            Self::BoardSchemaJson => props::BOARD_SCHEMA_JSON,
+            Self::BoardUniqueKey => props::BOARD_UNIQUE_KEY,
+            Self::BoardPublicReads => props::BOARD_PUBLIC_READS,
+            Self::BoardOwnerKeyHash => props::BOARD_OWNER_KEY_HASH,
+            Self::BoardCreatedAt => props::BOARD_CREATED_AT,
+            Self::BoardDescription => props::BOARD_DESCRIPTION,
+            Self::BoardIconKey => props::BOARD_ICON_KEY,
+            Self::BoardBannerKey => props::BOARD_BANNER_KEY,
+            Self::BoardGalleryKeys => props::BOARD_GALLERY_KEYS,
+            Self::BoardDeployedAt => props::BOARD_DEPLOYED_AT,
             Self::Unknown => "Unknown",
         }
     }
@@ -357,6 +405,18 @@ impl From<&str> for Property {
             props::PRODUCT_GALLERY => Self::ProductGallery,
             props::STOCK => Self::Stock,
             props::QUANTITY => Self::Quantity,
+            props::BOARD_ID => Self::BoardId,
+            props::BOARD_TITLE => Self::BoardTitle,
+            props::BOARD_SCHEMA_JSON => Self::BoardSchemaJson,
+            props::BOARD_UNIQUE_KEY => Self::BoardUniqueKey,
+            props::BOARD_PUBLIC_READS => Self::BoardPublicReads,
+            props::BOARD_OWNER_KEY_HASH => Self::BoardOwnerKeyHash,
+            props::BOARD_CREATED_AT => Self::BoardCreatedAt,
+            props::BOARD_DESCRIPTION => Self::BoardDescription,
+            props::BOARD_ICON_KEY => Self::BoardIconKey,
+            props::BOARD_BANNER_KEY => Self::BoardBannerKey,
+            props::BOARD_GALLERY_KEYS => Self::BoardGalleryKeys,
+            props::BOARD_DEPLOYED_AT => Self::BoardDeployedAt,
             _ => Self::Unknown,
         }
     }

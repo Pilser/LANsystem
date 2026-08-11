@@ -353,6 +353,9 @@ fn domain_badge(app: &Tenant) -> (&'static str, &'static str) {
         Some("marketplace") => {
             ("Marketplace", "border-sky-700 bg-sky-900/40 text-sky-200")
         }
+        Some("serverless") => {
+            ("Serverless", "border-violet-800 bg-violet-950/50 text-violet-300")
+        }
         _ => ("Media", "border-emerald-900 bg-emerald-950/60 text-emerald-300"),
     }
 }
@@ -405,7 +408,16 @@ fn status_meta(
 ) -> (String, Option<(&'static str, &'static str)>) {
     if app.status == "active" {
         if current.user.role() == Role::TenantAdmin {
-            return (String::from("Approved — your portal is ready."), Some(("/portal", "Open your portal")));
+            let console = if app
+                .apps_enabled
+                .as_deref()
+                .is_some_and(|items| items.iter().any(|s| s == "serverless"))
+            {
+                "Approved — open your Serverless console."
+            } else {
+                "Approved — your portal is ready."
+            };
+            return (String::from(console), Some(("/portal", "Open your portal")));
         }
         return (String::from("Approved — your business is live."), None);
     }

@@ -9,12 +9,13 @@ members = [
     "crates/business-apps/app-contract",
     "crates/business-apps/media",
     "crates/business-apps/marketplace",
+    "crates/business-apps/serverless",
     "crates/business-apps/agent",
     "crates/business-apps/admin",
     "crates/business-apps/onboarding",
     "apps/lan",
 ]
-exclude = ["topcoat", "helix-db"]
+exclude = ["topcoat", "helix-db", "turso"]
 
 [workspace.package]
 version = "0.1.0"
@@ -46,8 +47,9 @@ bytes = "1"
 # separate workspace with its own lockfile and is wired in by the serverless
 # business app, mirroring zerowrapper's path dependency.
 serverless-core = { path = "crates/serverless-core" }
-turso = { path = "../turso/bindings/rust" }
+turso = { path = "turso/bindings/rust" }
 sha2 = "0.10"
+rand = "0.9"
 
 # --- Full-stack web framework ---
 topcoat = { version = "0.5.0", features = ["websocket", "multipart", "sse", "htmx", "tailwind"] }
