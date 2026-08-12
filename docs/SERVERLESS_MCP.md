@@ -54,14 +54,67 @@ Errors echo the relevant layer: `{"status":"error","error":…,
   `<space_id>:<bucket>:<secret>`), and the same `BoardStore` + `Auth` code
   paths the web uses now answer the tool (MCP bugs == web bugs, like the
   agent rule).
-- **Every task asks for the space id as an argument** — and it must match
-  the id inside the key. The server re-derives the key's board and never
-  trusts the URL/params; a mismatch returns a scoped-error with the usage
-  layer attached.
+- **The key's leading id IS the space being managed** — `--space` is
+  optional and must match it. The server re-derives the key's board and
+  never trusts the URL/params; a mismatch returns a scoped-error with the
+  usage layer attached.
+
+## 2b. Native MCP over HTTP (`POST /mcp`)
+
+The app also speaks the real MCP protocol (JSON-RPC over HTTP, streamable-
+HTTP style, protocol `2025-06-18`) at **`POST /mcp`** — no stdio bridge, no
+Node: any MCP client points straight at the URL.
+
+| Method | Purpose |
+|---|---|
+| `POST /mcp` `initialize` | handshake → `protocolVersion`, `tools` capability |
+| `POST /mcp` `tools/list` | the single `cli` tool definition |
+| `POST /mcp` `tools/call` | runs `cli <group> <verb> [args]` |
+| `POST /mcp` `ping` | keep-alive |
+| `GET /mcp` | catalog (non-MCP, human/agent readable) |
+
+Same rules as the envelope endpoint: help layers answer with **no key**;
+commands need a key — the `x-srv-key` header
+(`<space_id>:owner:<secret>` or a scoped `<space_id>:<bucket>:<token>`),
+whose leading id is the space. Tool failures come back as
+`isError: true` text results (zerowrapper-style), never JSON-RPC errors.
+
+### 2b-1. No-header mode — the ONE string
+
+For "just pass the id" clients, the key string itself can be passed as the
+space in the call; the leading part IS the space id, the rest
+authenticates — no config JSON, the client only needs the url:
+
+```
+cli space show --space <space_id>:owner:<secret>      (or --key <string>)
+cli records count --key <space_id>:<bucket>:<token>
+```
+
+When both the header and an embedded string are given, their spaces must
+match (clear `key mismatch` error otherwise).
+
+Client config — opencode (`~/.config/opencode/opencode.json`):
+
+```json
+"lansrv-spaces": {
+  "type": "remote",
+  "url": "http://127.0.0.1:4321/mcp",
+  "enabled": true,
+  "headers": { "x-srv-key": "<space_id>:owner:<secret>" }
+}
+```
+
+(`headers` optional: without it the help layers still work, and commands
+answer a tool error explaining the missing key — or use no-header mode
+above. `headers` and no-header mode can coexist; spaces must agree.)
+Claude Code: same entry under `mcpServers` with `"type": "http"`.
 
 ## 3. The `cli` tool (groups + verbs)
 
-All mirror existing web/API capabilities; no new backend logic.
+Current verbs mirror existing web/API capabilities. The roadmap (§6) adds
+the app-runner store ops (search, math, realtime, calls, cron) — each lands
+with its public `verb_help` entry first, so `cli help …` documents a verb
+before the verb ships.
 
 ```
 usage: cli <group> <verb> <space_id> [args]
@@ -117,3 +170,134 @@ Layer 3 guide answers, in order:
   (`status:error` + `usage` + `hint`), never a bare 500.
 - No public `POST` can mutate anything (key required; `requires()` gates
   roles like the API).
+
+## 6. Full app-runner coverage (implemented)
+
+> Parity with zerowrapper's serverless at commit `cb66222`
+> (`zw-db/src/{cron,jobs,filters,calls,keys,hook_deliveries}.rs`,
+> `ch-web-ui/src/{scheduler,serverless_sse}.rs`, `zw-mcp/src/srv.rs`) is
+> **implemented** — see the completion status columns below and the E2E
+> verification notes in `SERVERLESS_SPACES.md` §10. Every feature ships as
+> a store method (`store.rs`) + same-path web/REST route + `verb_help`
+> entry, and keeps the key flow: `--space` optional (defaults to the key's
+> space), header or no-header mode, roles gate like the current verbs.
+
+### 6.1 Records: full CRUD, math, pagination, search — implemented
+
+| Verb | Shape | Role | Status |
+|---|---|---|---|
+| `insert` | `'<json>' [--writer <w>] [--upsert]` | writer+ | done |
+| `set` | `--seq N '<json>' [--writer <w>]` | writer+ | done |
+| `patch` | `--seq N '{"$set":{…},"$inc":{…}}' [--writer <w>]` | writer+ | done — ops apply `$inc`/`$dec`/`$mul` **before** `$set`, one SQLite write |
+| `query` | `<json-path> [--eq <v>]` | reader+ | done — `$.a.b[2]`, `$` = root |
+| `filter` | `--filter '<json>' [--order <path> [--asc\|--desc]] [--limit N] [--offset N]` | reader+ | done — ops `eq neq gt gte lt lte contains not_contains in`, and-lists |
+| `search` | `--q <text> [--hl] [--limit N] [--offset N]` | reader+ | done — case-insensitive substring via `LIKE` on the payload (no FTS5); `--hl` wraps matches in `<mark>` |
+| `aggregate` | `--op count\|sum\|avg\|min\|max --field <path> [--group-by <path>] [--filter '<json>']` | reader+ | done — count is `COUNT(*)`, others aggregate `json_extract`; grouped returns one row per key |
+| `bulk` | `'[<json>,…]'` (or varargs) `[--upsert] [--writer <w>]` | writer+ | done |
+| `delete` | `--seq N` **or** `--filter '<json>'` | writer+ | done (filter cascade is a single event) |
+| `list` | `[--limit N] [--offset N]` (REST: `before`) | reader+ | done — newest-first |
+
+REST mirrors for app JS (all under `/api/srv/{board_id}`, bearer-key auth,
+reads public when `public_reads`): `POST /records`, `PUT|PATCH|GET|DELETE
+/records/{seq}`, `GET /records?limit&offset&before`, `GET /records?q=&hl=1`,
+`GET /records?path=&eq=`, `GET /records?filter=&order=&desc=1`,
+`GET /aggregate?op=&field=&group_by=&filter=`, `DELETE /records?filter=`,
+`POST /records/bulk` (body `{"payloads":[…]}`).
+
+### 6.2 Realtime events (SSE) — implemented
+
+- `GET /api/srv/{board_id}/events?after=<event id>&filter=<kind>` — SSE:
+  replays events newer than the `after` id cursor (also resumed from the
+  `Last-Event-ID` header), then streams the live broadcast. `filter`
+  keeps a single event kind (`record.created|updated|deleted`). Capped at
+  500 replayed events (the `srv_events` table prunes old rows). Periodic
+  keep-alive comments. Reader role, or public when `public_reads`.
+- The event id doubles as the cursor; `data:` carries
+  `{"event", "id", "seq", "payload"}` for replayed rows and
+  `{"event", "seq", "payload", "boardId"}` live — clients should key off
+  the `id:` line either way.
+- A live broadcast channel (256 slots, lag-tolerant) fans out every
+  mutation; replay is DB-backed, so client reconnects never miss events.
+- WebSocket is deliberately not added — SSE covers polling apps and agents.
+
+### 6.3 Outbound API calls (app JS → external APIs) — implemented
+
+| Verb | Shape | Role | Status |
+|---|---|---|---|
+| `records call` | `<url> [--method M] [--body '<json>'] [--timeout-ms N]` | writer+ | done |
+
+SSRF guard: loopback/private/link-local/metadata URLs rejected (verified
+E2E: `127.0.0.1` and `169.254.169.254` blocked); body cap 2 MB; timeout
+0.5–60 s. Result `{"status":N,"headers":{…},"body":"…"}`.
+REST: `POST /api/srv/{board_id}/call`.
+
+### 6.4 Cron jobs (scheduler) — implemented
+
+| Verb | Shape | Role | Status |
+|---|---|---|---|
+| `space jobs add` | `--name <n> --schedule <cron\|@every> --action '<json>'` | admin+ | done |
+| `space jobs list` | | admin+ | done |
+| `space jobs remove` | `--id N` | admin+ | done |
+
+Schedule: 5-field cron (`min hour dom month dow` with `*`, `*/n`, `a-b`,
+`a,b`) or `@every 30s|5m|2h|1d`. Action JSON:
+`{"type":"http"|"poll","url","method","headers","body","timeout_ms","path":"$.a.b"}`.
+Background worker wakes every 15 s: `http` fires the request (SSRF-guarded),
+`poll` extracts the JSON path from the response and **inserts it as a
+record**. Every run records `last_run_at / last_status (ok|error) /
+last_message`; `next_run_at` reschedules automatically (verified E2E with
+a `@every 30s` job). Table `srv_jobs` per board (Turso), parsed with the
+cron engine in `src/cron.rs`.
+
+### 6.5 Webhook delivery queue (durable) — implemented
+
+| Verb | Shape | Role | Status |
+|---|---|---|---|
+| `hooks register` | `<url> [--secret <s>]` | admin+ | done |
+| `hooks list` | | admin+ | done |
+| `hooks remove` | `--url <url>` | admin+ | done |
+| `hooks deliveries` | `[--status pending\|ok\|dead] [--limit N]` | admin+ | done |
+| `hooks replay` | `[--id N]` (all when omitted) | admin+ | done |
+
+Delivery: HMAC-SHA256 `x-srv-signature` header (`sha256(secret + body)`),
+retries with exponential backoff `2^attempt` seconds (cap 300 s), dead-lettered
+after 5 failed attempts (visible in `deliveries`, re-runnable via `replay`).
+Triggered on `record.created/updated/deleted`; delivery is enqueued
+(`srv_hook_deliveries`) on every mutation, so queued events survive
+restarts. Verified E2E: a dead endpoint backed off 0→1→2→…→dead with the
+HTTP error in `last_message`, and `replay` re-queued it immediately.
+
+### 6.6 Space config, export, CORS — implemented
+
+- `space show` returns the full config (title, public_reads, unique key,
+  record count, deployed_at) — plus new verbs:
+  - `space config` — prints ttl/rate/audit/unique-key settings (admin+)
+  - `space ttl set --seconds N --field <path>` / `space ttl clear` —
+    records whose `payload[field]` (unix seconds) is past
+    `now + N` are **hidden from all reads** (list/get/search/filter/
+    aggregate) and swept every 30 s
+  - `space rate set --per-minute N` / `space rate clear` — in-memory
+    sliding 60 s window on the API, enforced with 429s
+  - `space audit on|off|list` — append-only trail (action, seq, payload
+    sha256) when enabled
+  - `space link set|clear|show` — record parent links (`via` labels)
+  - `space dump` / `space restore` — export/import the whole board
+    (config + records + hooks + links; restore preserves explicit seqs)
+- REST for app JS: `GET /api/srv/{board_id}/config`,
+  `PUT|DELETE /ttl|rate`, `PUT|GET /audit`, `POST /links`. CORS preflight
+  (`OPTIONS`) is answered on the whole `/api/srv/{board_id}/*` family.
+- Console (`/sl/{board}`): records search/filter/aggregate controls, jobs
+  add/list/remove, delivery queue + replay, and the config panel (ttl,
+  audit, rate, dump download, restore) — all server-rendered, no JS needed.
+
+### 6.7 Milestones — all landed
+
+1. **M1 — records ops** (6.1) — done (search uses LIKE, not FTS5; `--hl`
+   wraps matches in `<mark>`).
+2. **M2 — realtime SSE** (6.2) — done (event-id cursor + `Last-Event-ID`
+   resume + kind filter + keep-alive).
+3. **M3 — outbound calls + webhook queue** (6.3, 6.5) — done (SSRF guard
+   verified; durable retry queue with backoff + replay).
+4. **M4 — cron jobs** (6.4) — done (`srv_jobs`, 15 s worker, http/poll
+   actions, verified with a live `@every 30s` run).
+5. **M5 — config/export/CORS** (6.6) — done, plus the console panels.

@@ -3763,6 +3763,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "db",
+ "futures-core",
  "helix-db",
  "platform-auth",
  "platform-core",

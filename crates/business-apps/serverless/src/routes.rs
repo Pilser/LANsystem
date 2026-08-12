@@ -14,9 +14,11 @@ use topcoat::{
     Result,
     context::{Cx, app_context},
     router::{
+        Body,
         content::Json,
         content::multipart::Multipart,
-        error::{RouterErrorExt, SeeOther, bad_request, forbidden, not_found, redirect, see_other, unauthorized},
+        content::sse::{Event, KeepAlive, Sse},
+        error::{RouterErrorExt, SeeOther, bad_request, forbidden, not_found, redirect, see_other, too_many_requests, unauthorized},
         page, parse_query_params, path_param, route,
     },
     router::content::Form,
@@ -26,6 +28,7 @@ use topcoat::{
 };
 
 use crate::{cli, files, models, store::TursoStore};
+use futures_core::Stream;
 use serverless_core::{BoardStore, KeyRole};
 
 // The `boardId` segment captured by `/sl/{board_id}` and the API routes.
@@ -42,6 +45,9 @@ path_param!(bucket);
 
 // The `tool` segment of the MCP documentation routes.
 path_param!(tool);
+
+// The `job_id` segment of the job routes.
+path_param!(job_id);
 
 // The base64url-encoded build path of the serve/preview routes.
 path_param!(encoded);
@@ -235,9 +241,53 @@ async fn board_page(cx: &Cx) -> Result {
     }
 
     let app = store.board_get(NO_TENANT, raw).await?;
-    let records = store.record_list(NO_TENANT, raw, 25, None, 0).await?;
+    let bq = parse_query_params::<BoardQuery>(cx).ok().unwrap_or_default();
+    let query = bq.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+    let filter_json = bq.filter.as_deref().map(str::trim).filter(|f| !f.is_empty());
+    let order = bq.order.as_deref().map(str::trim).filter(|o| !o.is_empty());
+    let desc = bq.desc.as_deref().is_some_and(truthy);
+    let mut conds: Vec<crate::dsl::Cond> = Vec::new();
+    let filter_err: Option<String> = if let Some(f) = filter_json {
+        match serde_json::from_str::<Value>(f)
+            .map_err(|_| "filter must be JSON".to_string())
+            .and_then(|v| crate::dsl::parse_filter(&v).map(|p| p.conds).map_err(|e| format!("bad filter: {e}")))
+        {
+            Ok(c) => {
+                conds = c;
+                None
+            }
+            Err(e) => {
+                tracing::warn!(target: "lan", "board_page filter error: {e}");
+                Some(e)
+            }
+        }
+    } else {
+        None
+    };
+    let orders = order.map(|o| vec![(o.to_string(), !desc)]).unwrap_or_default();
+    let records = if let Some(q) = query {
+        store.record_search(raw, q, false, 50, 0).await?
+    } else if !conds.is_empty() || !orders.is_empty() {
+        store.record_filter(raw, &conds, &orders, 50, 0).await?
+    } else {
+        store.record_list(NO_TENANT, raw, 25, None, 0).await?
+    };
+    let agg = match bq.agg_op.as_deref().and_then(crate::dsl::Agg::parse) {
+        Some(op) => {
+            let field = bq.agg_field.as_deref().filter(|f| !f.is_empty()).unwrap_or("$");
+            let group = bq.agg_group.as_deref().filter(|g| !g.is_empty());
+            store
+                .record_aggregate(raw, op, field, group, &conds)
+                .await
+                .ok()
+        }
+        None => None,
+    };
     let keys = store.key_list(NO_TENANT, raw).await?;
     let hooks = store.hook_list(NO_TENANT, raw).await?;
+    let jobs = store.job_list(raw).await?;
+    let deliveries = store.delivery_list(raw, None, 20).await?;
+    let config = store.board_config(raw).await?;
 
     let owner_key = parse_query_params::<OwnerQuery>(cx)
         .ok()
@@ -253,25 +303,36 @@ async fn board_page(cx: &Cx) -> Result {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     let mcp_url = if host.is_empty() {
-        "/api/srv/mcp".to_string()
+        "/mcp".to_string()
     } else {
-        format!("http://{host}/api/srv/mcp")
+        format!("http://{host}/mcp")
     };
-    // When the one-time owner key is in the URL, the snippets below are
-    // copy-ready; otherwise they carry <space_id>/<key> placeholders.
-    let mcp_curl = if let Some(key) = owner_key.as_ref() {
-        format!(
-            r#"curl -X POST {mcp_url} -H "content-type: application/json" -H "x-srv-key: {raw}:owner:{key}" -d '{{"tool":"cli","params":{{"args":["space","show"]}}}}'"#
-        )
-    } else {
-        format!(
-            r#"curl -X POST {mcp_url} -H "content-type: application/json" -H "x-srv-key: <space_id>:owner:<key>" -d '{{"tool":"cli","params":{{"args":["space","show"]}}}}'"#
-        )
-    };
+    // When the one-time owner key is in the URL the snippets below are
+    // copy-ready; otherwise they carry <key> placeholders. The space id
+    // ({raw}) is the public handle — unique system-wide — the key is the
+    // authority; the single composite header line carries both.
     let mcp_header = if let Some(key) = owner_key.as_ref() {
         format!("x-srv-key: {raw}:owner:{key}")
     } else {
         format!("x-srv-key: {raw}:owner:<key>")
+    };
+    let mcp_config = if let Some(key) = owner_key.as_ref() {
+        format!(
+            "{{\n  \"mcp\": {{\n    \"lansrv-spaces\": {{\n      \"type\": \"remote\",\n      \"url\": \"{mcp_url}\",\n      \"enabled\": true,\n      \"headers\": {{ \"x-srv-key\": \"{raw}:owner:{key}\" }}\n    }}\n  }}\n}}",
+        )
+    } else {
+        format!(
+            "{{\n  \"mcp\": {{\n    \"lansrv-spaces\": {{\n      \"type\": \"remote\",\n      \"url\": \"{mcp_url}\",\n      \"enabled\": true,\n      \"headers\": {{ \"x-srv-key\": \"{raw}:owner:<key>\" }}\n    }}\n  }}\n}}",
+        )
+    };
+    let rpc_curl = if let Some(key) = owner_key.as_ref() {
+        format!(
+            r#"curl -X POST {mcp_url} -H "content-type: application/json" -H "x-srv-key: {raw}:owner:{key}" -d '{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"cli","arguments":{{"args":["space","show"]}}}}}}'"#
+        )
+    } else {
+        format!(
+            r#"curl -X POST {mcp_url} -H "content-type: application/json" -H "x-srv-key: {raw}:owner:<key>" -d '{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"cli","arguments":{{"args":["space","show"]}}}}}}'"#
+        )
     };
     let icon_key = board.board_icon_key.as_deref().filter(|k| !k.is_empty());
     let banner_key = board.board_banner_key.as_deref().filter(|k| !k.is_empty());
@@ -616,7 +677,7 @@ async fn board_page(cx: &Cx) -> Result {
                     </button>
                 </form>
                 <div class="mt-4 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
-                    <h3 class="mb-2 text-xs font-semibold text-zinc-300">"Agent / MCP access"</h3>
+                    <h3 class="mb-2 text-xs font-semibold text-zinc-300">"Agent (MCP) access"</h3>
                     <dl class="grid list-none gap-2 p-0 text-xs">
                         <div class="flex items-center gap-2">
                             <dt class="w-20 shrink-0 text-zinc-500">"Endpoint"</dt>
@@ -624,6 +685,17 @@ async fn board_page(cx: &Cx) -> Result {
                             <button
                                 onclick=(format!("navigator.clipboard.writeText('{}')", mcp_url))
                                 title="Copy endpoint"
+                                class="shrink-0 cursor-pointer rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 transition hover:border-sky-500 hover:text-sky-300"
+                            >
+                                "copy"
+                            </button>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <dt class="w-20 shrink-0 text-zinc-500">"Space id"</dt>
+                            <code class="min-w-0 flex-1 break-all text-zinc-200">(raw)</code>
+                            <button
+                                onclick=(format!("navigator.clipboard.writeText('{}')", raw))
+                                title="Copy space id"
                                 class="shrink-0 cursor-pointer rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 transition hover:border-sky-500 hover:text-sky-300"
                             >
                                 "copy"
@@ -642,25 +714,48 @@ async fn board_page(cx: &Cx) -> Result {
                         </div>
                     </dl>
                     <p class="mt-2 text-xs text-zinc-500">
-                        if owner_key.is_some() {
-                            "The header below is copy-ready with this space's owner key — point any MCP
-                            client at it and it drives the whole space (deploy included) from the
-                            space id alone. "
+                        "The space id is unique across the whole system and public (it lives in every "
+                        <code class="text-zinc-300">"/s/{raw}/"</code>
+                        if let Some(owner_secret) = owner_key.as_deref() {
+                            " URL). EASY MODE: pass the key string itself as the id — "
+                            <code class="text-zinc-300">(format!("cli space show --space {raw}:owner:{owner_secret}"))</code>
+                            " authenticates the call, no client config beyond the url. HEADER MODE: paste the same
+                            string into the client config below. "
                         } else {
-                            "<key> is the one-time owner key shown when the space was created — or issue a
-                            scoped key in the Keys section below ("
+                            " URL). A command needs a secret: the key string below — paste the one-time owner key
+                            shown when the space was created, or issue a scoped key in the Keys section ("
                             <code class="text-zinc-300">"x-srv-key: <space_id>:<bucket>:<token>"</code>
                             "). "
                         }
-                        "Every command manages the space from the header, so the agent never needs to
-                        pass the id — and all help layers work without any key. "
+                        "Every command works off that one string, and all help layers answer without any key. "
                         <a class="text-sky-400 hover:text-sky-300" href="/api/srv/mcp/guide">"full guide"</a> "."
                     </p>
+                    <p class="mt-2 text-xs text-zinc-400">
+                        "opencode — paste under "
+                        <code class="text-zinc-300">"\"mcp\""</code>
+                        " in "
+                        <code class="text-zinc-300">"~/.config/opencode/opencode.json"</code>
+                        " (Claude Code: "
+                        <code class="text-zinc-300">"mcpServers"</code>
+                        ", "
+                        <code class="text-zinc-300">"\"type\": \"http\""</code>
+                        "):"
+                    </p>
                     <div class="mt-2 flex items-start gap-2">
-                        <pre class="min-w-0 flex-1 overflow-x-auto rounded bg-zinc-900 p-2 text-[11px] leading-relaxed text-zinc-300">(mcp_curl.clone())</pre>
+                        <pre class="min-w-0 flex-1 overflow-x-auto rounded bg-zinc-900 p-2 text-[11px] leading-relaxed text-zinc-300">(mcp_config.clone())</pre>
                         <button
-                            onclick=(format!("navigator.clipboard.writeText('{}')", mcp_curl))
-                            title="Copy curl command"
+                            onclick=(format!("navigator.clipboard.writeText('{}')", mcp_config))
+                            title="Copy client config"
+                            class="shrink-0 cursor-pointer rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition hover:border-sky-500 hover:text-sky-300"
+                        >
+                            "copy"
+                        </button>
+                    </div>
+                    <div class="mt-2 flex items-start gap-2">
+                        <pre class="min-w-0 flex-1 overflow-x-auto rounded bg-zinc-900 p-2 text-[11px] leading-relaxed text-zinc-300">(rpc_curl.clone())</pre>
+                        <button
+                            onclick=(format!("navigator.clipboard.writeText('{}')", rpc_curl))
+                            title="Copy curl call"
                             class="shrink-0 cursor-pointer rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition hover:border-sky-500 hover:text-sky-300"
                         >
                             "copy"
@@ -676,6 +771,66 @@ async fn board_page(cx: &Cx) -> Result {
                         <p class="mb-2 text-sm text-red-400">(format!("API error: {err}"))</p>
                     }
                     None => {}
+                }
+                if let Some(e) = &filter_err {
+                    <p class="mb-2 text-sm text-red-400">(format!("filter error: {e}"))</p>
+                }
+                <form method="get" action=(format!("/sl/{raw}"))
+                    class="mb-3 grid grid-cols-2 gap-2 rounded-md bg-zinc-950 p-3"
+                >
+                    <input class="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="q"
+                        placeholder="search text (substring)" value=(bq.q.clone().unwrap_or_default()) />
+                    <input class="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="filter"
+                        placeholder=r#"filter JSON: [{"field":"price","op":"gt","value":10}]"#
+                        value=(bq.filter.clone().unwrap_or_default()) />
+                    <input class="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="order"
+                        placeholder="order by path (e.g. price)" value=(order.unwrap_or_default().to_string()) />
+                    <label class="flex items-center gap-2 text-xs text-zinc-400">
+                        <input type="checkbox" name="desc" value="1" checked=(desc) />
+                        "descending order"
+                    </label>
+                    <div class="col-span-2 flex flex-wrap items-center gap-2">
+                        <select class="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="agg_op">
+                            <option value="">"agg: none"</option>
+                            <option value="count" selected=(bq.agg_op.as_deref() == Some("count"))>"count"</option>
+                            <option value="sum" selected=(bq.agg_op.as_deref() == Some("sum"))>"sum"</option>
+                            <option value="avg" selected=(bq.agg_op.as_deref() == Some("avg"))>"avg"</option>
+                            <option value="min" selected=(bq.agg_op.as_deref() == Some("min"))>"min"</option>
+                            <option value="max" selected=(bq.agg_op.as_deref() == Some("max"))>"max"</option>
+                        </select>
+                        <input class="w-32 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="agg_field"
+                            placeholder="field ($)" value=(bq.agg_field.clone().unwrap_or_default()) />
+                        <input class="w-32 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="agg_group"
+                            placeholder="group by" value=(bq.agg_group.clone().unwrap_or_default()) />
+                        <button class="ml-auto rounded-md bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-500">
+                            "Apply"
+                        </button>
+                        <a class="rounded-md border border-zinc-700 px-3 py-1 text-xs text-zinc-400 hover:border-sky-500"
+                            href=(format!("/sl/{raw}"))>"Clear"</a>
+                    </div>
+                </form>
+                if let Some(a) = &agg {
+                    <div class="mb-2 rounded-md bg-zinc-950 px-3 py-2 text-xs text-zinc-300">
+                        "Aggregate"
+                        if a.get("rows").is_some() {
+                            for row in a.get("rows").and_then(|r| r.as_array()).into_iter().flatten() {
+                                <span class="mx-2 inline-flex items-baseline gap-1 rounded bg-zinc-900 px-2 py-0.5">
+                                    <code class="text-sky-300">(row.get("key").and_then(|v| v.as_str()).unwrap_or("?"))</code>
+                                    "="
+                                    <code class="text-zinc-200">(row.get("value").map(|v| v.to_string()).unwrap_or_default())</code>
+                                </span>
+                            }
+                        }
+                        if a.get("rows").is_none() {
+                            <span>
+                                <code class="text-sky-300">(a.get("op").and_then(|v| v.as_str()).unwrap_or("agg"))</code>
+                                "("
+                                <code>(a.get("field").and_then(|v| v.as_str()).unwrap_or("$"))</code>
+                                ") = "
+                                <code class="text-zinc-200">(a.get("value").map(|v| v.to_string()).unwrap_or_default())</code>
+                            </span>
+                        }
+                    </div>
                 }
                 <ul class="grid list-none gap-2 p-0">
                     for rec in &records {
@@ -778,6 +933,161 @@ async fn board_page(cx: &Cx) -> Result {
                 if hooks.is_empty() {
                     <p class="py-3 text-sm text-zinc-500">"No hooks yet."</p>
                 }
+            </section>
+
+            <section class="mb-8 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                <h2 class="mb-3 text-sm font-semibold text-zinc-300">"Jobs"</h2>
+                <form method="post" action=(format!("/sl/{raw}/jobs/add")) class="mb-3 grid grid-cols-2 gap-2">
+                    <input class="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="name"
+                        placeholder="name (e.g. ping)" />
+                    <input class="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="schedule"
+                        placeholder="@every 30s or 0 */5 * * * *" />
+                    <div class="col-span-2 flex items-center gap-2">
+                        <input class="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs"
+                            name="action" placeholder=r#"action JSON: {"url":"https://…","method":"GET"}"# />
+                        <button class="rounded-md bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-500">
+                            "Add job"
+                        </button>
+                    </div>
+                </form>
+                <ul class="grid list-none gap-2 p-0">
+                    for job in &jobs {
+                        <li class="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-md bg-zinc-950 px-3 py-2 text-xs">
+                            <span class="text-zinc-500">(format!("#{}", jv_i64(job, "id")))</span>
+                            <div class="min-w-0">
+                                <div class="truncate text-zinc-200">
+                                    <code>(jv_str(job, "name"))</code>
+                                    " — "
+                                    <code class="text-zinc-400">(jv_str(job, "schedule"))</code>
+                                </div>
+                                <div class="truncate text-zinc-500">
+                                    <code>(job.get("action").map(|a| a.to_string()).unwrap_or_default())</code>
+                                </div>
+                                <div class="truncate text-zinc-500">
+                                    "next " <code class="text-zinc-400">(jv_i64(job, "next_run_at"))</code>
+                                    " · last " <code class="text-zinc-400">(jv_str(job, "last_status"))</code>
+                                    <code class="text-zinc-600">(jv_str(job, "last_message"))</code>
+                                </div>
+                            </div>
+                            <form method="post" action=(format!("/sl/{raw}/jobs/remove"))>
+                                <input type="hidden" name="id" value=(jv_i64(job, "id").to_string()) />
+                                <button class="rounded-md border border-red-900 px-2 py-0.5 text-red-400 hover:bg-red-950">
+                                    "Remove"
+                                </button>
+                            </form>
+                        </li>
+                    }
+                </ul>
+                if jobs.is_empty() {
+                    <p class="py-3 text-sm text-zinc-500">"No jobs yet — scheduled HTTP calls or record writes."</p>
+                }
+            </section>
+
+            <section class="mb-8 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                <h2 class="mb-3 text-sm font-semibold text-zinc-300">"Hook deliveries"</h2>
+                <form method="post" action=(format!("/sl/{raw}/deliveries/replay")) class="mb-3 flex items-center gap-2">
+                    <span class="text-xs text-zinc-500">"Failed and dead deliveries are retried with backoff; re-queue them now."</span>
+                    <button class="ml-auto rounded-md border border-sky-700 px-3 py-1 text-xs text-sky-300 hover:bg-sky-950">
+                        "Replay"
+                    </button>
+                </form>
+                <ul class="grid list-none gap-2 p-0">
+                    for d in &deliveries {
+                        <li class="rounded-md bg-zinc-950 px-3 py-2 text-xs">
+                            <div class="flex items-baseline gap-3">
+                                <span class="text-zinc-500">(format!("#{}", jv_i64(d, "id")))</span>
+                                <code class="text-sky-300">(jv_str(d, "event"))</code>
+                                if let Some(seq) = d.get("seq").and_then(|v| v.as_i64()) {
+                                    <code class="text-zinc-500">(format!("@seq {seq}"))</code>
+                                }
+                                <span class="ml-auto text-zinc-400">(format!("attempt {}", jv_i64(d, "attempt")))</span>
+                                <span class=(if jv_str(d, "status") == "ok" { "text-emerald-400" } else { "text-amber-400" })>
+                                    (jv_str(d, "status"))
+                                </span>
+                            </div>
+                            <div class="mt-0.5 truncate text-zinc-500">
+                                <code class="text-zinc-400">(jv_str(d, "url"))</code>
+                                if !jv_str(d, "last_message").is_empty() {
+                                    " — " <code class="text-zinc-600">(jv_str(d, "last_message"))</code>
+                                }
+                            </div>
+                        </li>
+                    }
+                </ul>
+                if deliveries.is_empty() {
+                    <p class="py-3 text-sm text-zinc-500">"No deliveries yet — hook events are queued here."</p>
+                }
+            </section>
+
+            <section class="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                <h2 class="mb-3 text-sm font-semibold text-zinc-300">"Config"</h2>
+                <div class="mb-3 grid grid-cols-3 gap-2 text-xs text-zinc-400">
+                    <div class="rounded-md bg-zinc-950 px-3 py-2">
+                        "TTL: "
+                        if let Some(s) = config.get("ttl_seconds").and_then(|v| v.as_i64()) {
+                            <span class="text-zinc-200">(format!("{s}s on '{}'", jv_str(&config, "ttl_field")))</span>
+                        }
+                        if config.get("ttl_seconds").and_then(|v| v.as_i64()).is_none() {
+                            <span class="text-zinc-600">"off"</span>
+                        }
+                    </div>
+                    <div class="rounded-md bg-zinc-950 px-3 py-2">
+                        "Audit: "
+                        if config.get("audit").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            <span class="text-emerald-400">"on"</span>
+                        }
+                        if !config.get("audit").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            <span class="text-zinc-600">"off"</span>
+                        }
+                    </div>
+                    <div class="rounded-md bg-zinc-950 px-3 py-2">
+                        "Rate: "
+                        if config.get("rate_per_minute").and_then(|v| v.as_i64()).unwrap_or(0) > 0 {
+                            <span class="text-zinc-200">(format!("{} req/min", config.get("rate_per_minute").and_then(|v| v.as_i64()).unwrap_or(0)))</span>
+                        }
+                        if config.get("rate_per_minute").and_then(|v| v.as_i64()).unwrap_or(0) == 0 {
+                            <span class="text-zinc-600">"unlimited"</span>
+                        }
+                    </div>
+                </div>
+                <div class="mb-3 grid grid-cols-2 gap-3">
+                    <form method="post" action=(format!("/sl/{raw}/ttl")) class="flex items-center gap-2">
+                        <input class="w-20 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="seconds"
+                            type="number" min="0" placeholder="secs" />
+                        <input class="w-24 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="field"
+                            placeholder="expires_at" />
+                        <button class="rounded-md border border-zinc-700 px-2 py-1 text-xs hover:border-sky-500">"Set TTL"</button>
+                        <button class="rounded-md border border-red-900 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                            name="seconds" value="0">"Clear"</button>
+                    </form>
+                    <form method="post" action=(format!("/sl/{raw}/audit")) class="flex items-center gap-2">
+                        <input type="hidden" name="enabled"
+                            value=(if config.get("audit").and_then(|v| v.as_bool()).unwrap_or(false) { "off" } else { "on" }) />
+                        <span class="text-xs text-zinc-500">"Audit trail"</span>
+                        <button class="ml-auto rounded-md border border-zinc-700 px-2 py-1 text-xs hover:border-sky-500">
+                            (if config.get("audit").and_then(|v| v.as_bool()).unwrap_or(false) { "Turn off" } else { "Turn on" })
+                        </button>
+                    </form>
+                    <form method="post" action=(format!("/sl/{raw}/rate")) class="flex items-center gap-2">
+                        <input class="w-24 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs" name="per_minute"
+                            type="number" min="0" placeholder="per minute" />
+                        <button class="rounded-md border border-zinc-700 px-2 py-1 text-xs hover:border-sky-500">"Set rate"</button>
+                        <button class="rounded-md border border-red-900 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                            name="per_minute" value="0">"Clear"</button>
+                    </form>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-zinc-500">"Export / restore (JSON)"</span>
+                        <a class="ml-auto rounded-md border border-zinc-700 px-2 py-1 text-xs hover:border-sky-500"
+                            href=(format!("/sl/{raw}/dump"))>"Download dump"</a>
+                    </div>
+                </div>
+                <form method="post" action=(format!("/sl/{raw}/restore")) class="flex items-end gap-2">
+                    <textarea name="dump" rows="4" placeholder="Paste a dump JSON document here to restore…"
+                        class="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs outline-none focus:border-sky-400"></textarea>
+                    <button class="rounded-md bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-500">
+                        "Restore"
+                    </button>
+                </form>
             </section>
         </div>
     }
@@ -883,6 +1193,204 @@ async fn remove_hook(Form(form): Form<UrlForm>, cx: &Cx) -> Result {
         .map_err(|e| bad_request(format!("hook failed: {e}")))?;
     let back = format!("/sl/{raw}");
     Err(redirect(&back).into())
+}
+
+/// `POST /sl/{board}/jobs/add`: schedule a cron job (web form).
+#[route(POST "/sl/{board_id}/jobs/add")]
+async fn add_job(Form(form): Form<WebJobForm>, cx: &Cx) -> Result {
+    let raw: &str = path_param::<BoardId>(cx);
+    let auth = platform_core::auth(cx);
+    let store = app_context::<TursoStore>(cx);
+    let current = auth.current_user(cx).await?;
+    let Some(board) = board_row(cx, raw).await? else {
+        return Err(not_found().into());
+    };
+    if !is_staff_for(current.as_ref(), &board) {
+        return Err(forbidden().into());
+    }
+    let (Some(name), Some(schedule), Some(action_text)) = (
+        form.name.filter(|n| !n.trim().is_empty()),
+        form.schedule.as_deref().filter(|s| !s.trim().is_empty()),
+        form.action.as_deref().filter(|a| !a.trim().is_empty()),
+    ) else {
+        return Err(redirect(&format!("/sl/{raw}?err=job")).into());
+    };
+    let action: Value = match serde_json::from_str(action_text) {
+        Ok(v) => v,
+        Err(_) => return Err(redirect(&format!("/sl/{raw}?err=job")).into()),
+    };
+    if let Err(e) = store.job_add(raw, &name, schedule, &action).await {
+        tracing::warn!(target: "lan", "job add failed: {e}");
+        return Err(redirect(&format!("/sl/{raw}?err=job")).into());
+    }
+    Err(redirect(&format!("/sl/{raw}")).into())
+}
+
+/// `POST /sl/{board}/jobs/remove`.
+#[route(POST "/sl/{board_id}/jobs/remove")]
+async fn remove_job(Form(form): Form<JobIdForm>, cx: &Cx) -> Result {
+    let raw: &str = path_param::<BoardId>(cx);
+    let auth = platform_core::auth(cx);
+    let store = app_context::<TursoStore>(cx);
+    let current = auth.current_user(cx).await?;
+    let Some(board) = board_row(cx, raw).await? else {
+        return Err(not_found().into());
+    };
+    if !is_staff_for(current.as_ref(), &board) {
+        return Err(forbidden().into());
+    }
+    if let Some(id) = form.id {
+        let _ = store.job_remove(raw, id).await;
+    }
+    Err(redirect(&format!("/sl/{raw}")).into())
+}
+
+/// `POST /sl/{board}/deliveries/replay`: re-queue failed/dead deliveries.
+#[route(POST "/sl/{board_id}/deliveries/replay")]
+async fn replay_deliveries(cx: &Cx) -> Result {
+    let raw: &str = path_param::<BoardId>(cx);
+    let auth = platform_core::auth(cx);
+    let store = app_context::<TursoStore>(cx);
+    let current = auth.current_user(cx).await?;
+    let Some(board) = board_row(cx, raw).await? else {
+        return Err(not_found().into());
+    };
+    if !is_staff_for(current.as_ref(), &board) {
+        return Err(forbidden().into());
+    }
+    if let Err(e) = store.delivery_replay(raw, None).await {
+        tracing::warn!(target: "lan", "delivery replay failed: {e}");
+        return Err(redirect(&format!("/sl/{raw}?err=hook")).into());
+    }
+    Err(redirect(&format!("/sl/{raw}")).into())
+}
+
+/// `POST /sl/{board}/ttl`: set (seconds>0) or clear (seconds=0) expiry.
+#[route(POST "/sl/{board_id}/ttl")]
+async fn set_ttl(Form(form): Form<TtlForm>, cx: &Cx) -> Result {
+    let raw: &str = path_param::<BoardId>(cx);
+    let auth = platform_core::auth(cx);
+    let store = app_context::<TursoStore>(cx);
+    let current = auth.current_user(cx).await?;
+    let Some(board) = board_row(cx, raw).await? else {
+        return Err(not_found().into());
+    };
+    if !is_staff_for(current.as_ref(), &board) {
+        return Err(forbidden().into());
+    }
+    match form.seconds {
+        Some(s) if s > 0 => {
+            let field = form.field.as_deref().filter(|f| !f.is_empty()).unwrap_or("expires_at");
+            if let Err(e) = store.ttl_set(raw, s, field).await {
+                tracing::warn!(target: "lan", "ttl set failed: {e}");
+                return Err(redirect(&format!("/sl/{raw}?err=ttl")).into());
+            }
+        }
+        Some(_) => {
+            let _ = store.ttl_clear(raw).await;
+        }
+        None => return Err(redirect(&format!("/sl/{raw}?err=ttl")).into()),
+    }
+    Err(redirect(&format!("/sl/{raw}")).into())
+}
+
+/// `POST /sl/{board}/audit`: `enabled=on|off`.
+#[route(POST "/sl/{board_id}/audit")]
+async fn set_audit(Form(form): Form<WebEnabledForm>, cx: &Cx) -> Result {
+    let raw: &str = path_param::<BoardId>(cx);
+    let auth = platform_core::auth(cx);
+    let store = app_context::<TursoStore>(cx);
+    let current = auth.current_user(cx).await?;
+    let Some(board) = board_row(cx, raw).await? else {
+        return Err(not_found().into());
+    };
+    if !is_staff_for(current.as_ref(), &board) {
+        return Err(forbidden().into());
+    }
+    let enabled = form.enabled.as_deref() == Some("on");
+    if let Err(e) = store.audit_enable(raw, enabled).await {
+        tracing::warn!(target: "lan", "audit set failed: {e}");
+        return Err(redirect(&format!("/sl/{raw}?err=audit")).into());
+    }
+    Err(redirect(&format!("/sl/{raw}")).into())
+}
+
+/// `POST /sl/{board}/rate`: set (per_minute>0) or clear (per_minute=0).
+#[route(POST "/sl/{board_id}/rate")]
+async fn set_rate(Form(form): Form<RateForm>, cx: &Cx) -> Result {
+    let raw: &str = path_param::<BoardId>(cx);
+    let auth = platform_core::auth(cx);
+    let store = app_context::<TursoStore>(cx);
+    let current = auth.current_user(cx).await?;
+    let Some(board) = board_row(cx, raw).await? else {
+        return Err(not_found().into());
+    };
+    if !is_staff_for(current.as_ref(), &board) {
+        return Err(forbidden().into());
+    }
+    match form.per_minute {
+        Some(p) if p > 0 => {
+            if let Err(e) = store.rate_set(raw, p).await {
+                tracing::warn!(target: "lan", "rate set failed: {e}");
+                return Err(redirect(&format!("/sl/{raw}?err=rate")).into());
+            }
+        }
+        Some(_) => {
+            let _ = store.rate_set(raw, 0).await;
+            store.rate_reset(raw).await;
+        }
+        None => return Err(redirect(&format!("/sl/{raw}?err=rate")).into()),
+    }
+    Err(redirect(&format!("/sl/{raw}")).into())
+}
+
+/// `GET /sl/{board}/dump`: the whole board as one JSON document.
+#[route(GET "/sl/{board_id}/dump")]
+async fn dump_board(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let auth = platform_core::auth(cx);
+    let store = app_context::<TursoStore>(cx);
+    let current = auth.current_user(cx).await?;
+    let Some(board) = board_row(cx, raw).await? else {
+        return Err(not_found().into());
+    };
+    if !is_staff_for(current.as_ref(), &board) {
+        return Err(forbidden().into());
+    }
+    let dump = store
+        .record_dump(raw)
+        .await
+        .map_err(|e| bad_request(format!("dump failed: {e}")))?;
+    Ok(Json(dump))
+}
+
+/// `POST /sl/{board}/restore`: paste a dump document back into the board.
+#[route(POST "/sl/{board_id}/restore")]
+async fn restore_board(Form(form): Form<RestoreForm>, cx: &Cx) -> Result {
+    let raw: &str = path_param::<BoardId>(cx);
+    let auth = platform_core::auth(cx);
+    let store = app_context::<TursoStore>(cx);
+    let current = auth.current_user(cx).await?;
+    let Some(board) = board_row(cx, raw).await? else {
+        return Err(not_found().into());
+    };
+    if !is_staff_for(current.as_ref(), &board) {
+        return Err(forbidden().into());
+    }
+    let dump: Value = match serde_json::from_str(form.dump.trim()) {
+        Ok(v) => v,
+        Err(_) => return Err(redirect(&format!("/sl/{raw}?err=restore")).into()),
+    };
+    match store.record_restore(raw, &dump).await {
+        Ok(counts) => {
+            tracing::info!(target: "lan", "restored {counts} on {raw}");
+            Err(redirect(&format!("/sl/{raw}")).into())
+        }
+        Err(e) => {
+            tracing::warn!(target: "lan", "restore failed: {e}");
+            Err(redirect(&format!("/sl/{raw}?err=restore")).into())
+        }
+    }
 }
 
 /// `POST /sl/{board}/delete`: tombstone the catalog row + drop the files.
@@ -1537,13 +2045,40 @@ async fn resolve_key(cx: &Cx, board_id: &str, token: &str) -> Result<Option<ApiA
 }
 
 async fn api_auth(cx: &Cx, board_id: &str) -> Result<(models::ServerlessBoard, Option<ApiAuth>)> {
+    api_auth_impl(cx, board_id, true).await
+}
+
+/// Like `api_auth`, but never applies the rate limit (used by the rate
+/// set/clear routes themselves, which must stay reachable when limited).
+async fn api_auth_unlimited(cx: &Cx, board_id: &str) -> Result<(models::ServerlessBoard, Option<ApiAuth>)> {
+    api_auth_impl(cx, board_id, false).await
+}
+
+async fn api_auth_impl(
+    cx: &Cx,
+    board_id: &str,
+    apply_rate: bool,
+) -> Result<(models::ServerlessBoard, Option<ApiAuth>)> {
     let Some(board) = board_row(cx, board_id).await? else {
         return Err(not_found().into());
     };
     let Some(token) = bearer(cx) else {
         return Ok((board, None));
     };
-    Ok((board, resolve_key(cx, board_id, &token).await?))
+    let auth = resolve_key(cx, board_id, &token).await?;
+    if apply_rate {
+        if let Some(a) = &auth {
+            let bucket = match a {
+                ApiAuth::Key(k) => k.bucket.clone(),
+                ApiAuth::Owner(_) => "owner".to_string(),
+            };
+            let store = app_context::<TursoStore>(cx);
+            if !store.rate_allow(board_id, &bucket).await {
+                return Err(too_many_requests(1).into());
+            }
+        }
+    }
+    Ok((board, auth))
 }
 
 pub(crate) fn requires(auth: &Option<ApiAuth>, min: KeyRole) -> Result<()> {
@@ -1603,7 +2138,10 @@ async fn api_record_insert(Json(req): Json<RecordInsert>, cx: &Cx) -> Result<Jso
     Ok(Json(json!({ "seq": seq, "boardId": raw })))
 }
 
-/// `GET /api/srv/{board}/records?limit&before&offset`.
+/// `GET /api/srv/{board}/records?limit&before&offset`, enriched with
+/// `q` (substring search, `hl=1` → `<mark>` highlight), `filter`
+/// (JSON conditions `[{"field","op","value"}]` or a single object),
+/// `order`/`desc` (sort by a JSON path) — search/filter take precedence.
 #[route(GET "/api/srv/{board_id}/records")]
 async fn api_record_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
@@ -1612,11 +2150,47 @@ async fn api_record_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
         return Err(unauthorized().into());
     }
     let q = parse_query_params::<ListQuery>(cx).unwrap_or_default();
+    let limit = q.limit.unwrap_or(25).clamp(1, 500);
+    let offset = q.offset.unwrap_or(0).max(0);
     let store = app_context::<TursoStore>(cx);
-    let items = store
-        .record_list(NO_TENANT, raw, q.limit.unwrap_or(25).clamp(1, 500), q.before, q.offset.unwrap_or(0))
-        .await
-        .map_err(|e| bad_request(format!("list failed: {e}")))?;
+    let items = if let Some(query) = q.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        store
+            .record_search(raw, query, q.hl.as_deref().is_some_and(truthy), limit, offset)
+            .await
+            .map_err(|e| bad_request(format!("search failed: {e}")))?
+    } else if let Some(path) = q.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        let eq = q
+            .eq
+            .as_deref()
+            .filter(|e| !e.trim().is_empty())
+            .map(serde_json::from_str::<Value>)
+            .transpose()
+            .map_err(|_| bad_request("eq must be JSON"))?;
+        store
+            .record_query(raw, path, eq.as_ref(), limit, offset)
+            .await
+            .map_err(|e| bad_request(format!("query failed: {e}")))?
+    } else if let Some(filter) = q.filter.as_deref().filter(|f| !f.trim().is_empty()) {
+        let filter_value: Value = serde_json::from_str(filter)
+            .map_err(|_| bad_request("filter must be JSON"))?;
+        let parsed = crate::dsl::parse_filter(&filter_value)
+            .map_err(|e| bad_request(format!("bad filter: {e}")))?;
+        let orders = q
+            .order
+            .as_deref()
+            .filter(|o| !o.is_empty())
+            .map(|o| vec![(o.to_string(), q.desc.as_deref().map(|d| !truthy(d)).unwrap_or(true))])
+            .unwrap_or_default();
+        store
+            .record_filter(raw, &parsed.conds, &orders, limit, offset)
+            .await
+            .map_err(|e| bad_request(format!("filter failed: {e}")))?
+    } else {
+        store
+            .record_list(NO_TENANT, raw, limit, q.before, offset)
+            .await
+            .map_err(|e| bad_request(format!("list failed: {e}")))?
+    };
     Ok(Json(json!({ "items": items })))
 }
 
@@ -1751,6 +2325,574 @@ async fn api_hook_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
 }
 
 // ---------------------------------------------------------------------------
+// Records: set / patch / filter / search / aggregate / bulk / delete-filter
+// ---------------------------------------------------------------------------
+
+/// `PUT /api/srv/{board}/records/{seq}`: replace the whole payload.
+#[route(PUT "/api/srv/{board_id}/records/{seq}")]
+async fn api_record_set(Json(req): Json<RecordInsert>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let seq: &str = path_param::<Seq>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Writer)?;
+    let Ok(seq) = seq.parse::<i64>() else {
+        return Err(bad_request("invalid seq").into());
+    };
+    let store = app_context::<TursoStore>(cx);
+    let writer = writer_of(&auth);
+    store
+        .record_set(NO_TENANT, raw, seq, &req.payload, writer.as_deref())
+        .await
+        .map_err(|e| bad_request(format!("set failed: {e}")))?;
+    Ok(Json(json!({ "ok": true, "seq": seq })))
+}
+
+/// `PATCH /api/srv/{board}/records/{seq}`: `{"patch": {"$set": {...}, ...}}`.
+#[route(PATCH "/api/srv/{board_id}/records/{seq}")]
+async fn api_record_patch(Json(req): Json<PatchForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let seq: &str = path_param::<Seq>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Writer)?;
+    let Ok(seq) = seq.parse::<i64>() else {
+        return Err(bad_request("invalid seq").into());
+    };
+    let store = app_context::<TursoStore>(cx);
+    let writer = writer_of(&auth);
+    let updated = store
+        .record_patch(raw, seq, &req.patch, writer.as_deref())
+        .await
+        .map_err(|e| bad_request(format!("patch failed: {e}")))?;
+    Ok(Json(json!({ "ok": true, "seq": seq, "payload": updated })))
+}
+
+/// `GET /api/srv/{board}/aggregate?op=count|sum|avg|min|max&field=&group_by=&filter=`.
+#[route(GET "/api/srv/{board_id}/aggregate")]
+async fn api_record_aggregate(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (board, auth) = api_auth(cx, raw).await?;
+    if !board.board_public_reads.unwrap_or(false) && auth.is_none() {
+        return Err(unauthorized().into());
+    }
+    let q = parse_query_params::<AggregateQuery>(cx).unwrap_or_default();
+    let Some(op) = q.op.as_deref().and_then(crate::dsl::Agg::parse) else {
+        return Err(bad_request("op must be count|sum|avg|min|max").into());
+    };
+    let conds = match q.filter.as_deref().filter(|f| !f.trim().is_empty()) {
+        Some(filter) => {
+            let filter_value: Value = serde_json::from_str(filter)
+                .map_err(|_| bad_request("filter must be JSON"))?;
+            crate::dsl::parse_filter(&filter_value)
+                .map_err(|e| bad_request(format!("bad filter: {e}")))?
+                .conds
+        }
+        None => Vec::new(),
+    };
+    let store = app_context::<TursoStore>(cx);
+    let result = store
+        .record_aggregate(raw, op, q.field.as_deref().unwrap_or("$"), q.group_by.as_deref(), &conds)
+        .await
+        .map_err(|e| bad_request(format!("aggregate failed: {e}")))?;
+    Ok(Json(result))
+}
+
+/// `POST /api/srv/{board}/records/bulk`: `{"payloads": [{...}, ...]}` (alias `items`).
+#[route(POST "/api/srv/{board_id}/records/bulk")]
+async fn api_record_bulk(Json(req): Json<BulkInsert>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Writer)?;
+    let store = app_context::<TursoStore>(cx);
+    let writer = writer_of(&auth);
+    let seqs = store
+        .record_bulk_insert(raw, req.payloads, writer.as_deref())
+        .await
+        .map_err(|e| bad_request(format!("bulk failed: {e}")))?;
+    Ok(Json(json!({ "seqs": seqs, "count": seqs.len() })))
+}
+
+/// `DELETE /api/srv/{board}/records?filter=<json>` — delete everything
+/// matching the filter (no `filter` param on this route is a 400 guard).
+#[route(DELETE "/api/srv/{board_id}/records")]
+async fn api_record_delete_filter(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Writer)?;
+    let Some(filter) = parse_query_params::<FilterQuery>(cx).ok().and_then(|f| f.filter) else {
+        return Err(bad_request("missing filter query param").into());
+    };
+    let filter_value: Value = serde_json::from_str(&filter)
+        .map_err(|_| bad_request("filter must be JSON"))?;
+    let parsed = crate::dsl::parse_filter(&filter_value)
+        .map_err(|e| bad_request(format!("bad filter: {e}")))?;
+    let store = app_context::<TursoStore>(cx);
+    let deleted = store
+        .record_delete_filter(raw, &parsed.conds)
+        .await
+        .map_err(|e| bad_request(format!("delete failed: {e}")))?;
+    Ok(Json(json!({ "deleted": deleted })))
+}
+
+/// `POST /api/srv/{board}/records/{seq}/links`: `{"parent": seq, "via": "x"}`.
+#[route(POST "/api/srv/{board_id}/records/{seq}/links")]
+async fn api_link_set(Json(req): Json<LinkForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let seq: &str = path_param::<Seq>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Writer)?;
+    let Ok(seq) = seq.parse::<i64>() else {
+        return Err(bad_request("invalid seq").into());
+    };
+    let (Some(parent), Some(via)) = (req.parent, req.via.as_deref().filter(|v| !v.is_empty())) else {
+        return Err(bad_request("need parent seq and via").into());
+    };
+    let store = app_context::<TursoStore>(cx);
+    store
+        .link_set(raw, seq, parent, via)
+        .await
+        .map_err(|e| bad_request(format!("link failed: {e}")))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `GET /api/srv/{board}/records/{seq}/links` — resolve the record's parents.
+#[route(GET "/api/srv/{board_id}/records/{seq}/links")]
+async fn api_link_get(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let seq: &str = path_param::<Seq>(cx);
+    let (board, auth) = api_auth(cx, raw).await?;
+    if !board.board_public_reads.unwrap_or(false) && auth.is_none() {
+        return Err(unauthorized().into());
+    }
+    let Ok(seq) = seq.parse::<i64>() else {
+        return Err(bad_request("invalid seq").into());
+    };
+    let store = app_context::<TursoStore>(cx);
+    let links = store.link_get(raw, seq).await.map_err(|e| bad_request(format!("links failed: {e}")))?;
+    Ok(Json(json!({ "items": links })))
+}
+
+/// `DELETE /api/srv/{board}/records/{seq}/links?via=` — remove one link.
+#[route(DELETE "/api/srv/{board_id}/records/{seq}/links")]
+async fn api_link_clear(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let seq: &str = path_param::<Seq>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Writer)?;
+    let Ok(seq) = seq.parse::<i64>() else {
+        return Err(bad_request("invalid seq").into());
+    };
+    let Some(via) = parse_query_params::<ViaQuery>(cx).ok().and_then(|v| v.via) else {
+        return Err(bad_request("missing via query param").into());
+    };
+    let store = app_context::<TursoStore>(cx);
+    let cleared = store.link_clear(raw, seq, &via).await.map_err(|e| bad_request(format!("link failed: {e}")))?;
+    Ok(Json(json!({ "cleared": cleared })))
+}
+
+// ---------------------------------------------------------------------------
+// Calls (SSRF-guarded outbound HTTP), jobs, deliveries, config
+// ---------------------------------------------------------------------------
+
+/// `POST /api/srv/{board}/call`: `{"url", "method"?, "headers"?, "body"?,
+/// "timeout_ms"?}` — server-side HTTP with the SSRF guard; response body
+/// capped at 2MB.
+#[route(POST "/api/srv/{board_id}/call")]
+async fn api_record_call(Json(req): Json<CallBody>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Writer)?;
+    let Some(url) = req.url.filter(|u| crate::netguard::valid_url(u)) else {
+        return Err(bad_request("url rejected (public http(s) only)").into());
+    };
+    let method = req.method.as_deref().unwrap_or("POST").to_uppercase();
+    let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
+        return Err(bad_request("invalid method").into());
+    };
+    let timeout_ms = req.timeout_ms.unwrap_or(10_000).clamp(500, 60_000);
+    let mut builder = reqwest::Client::new()
+        .request(method, &url)
+        .timeout(std::time::Duration::from_millis(timeout_ms));
+    if let Some(headers) = req.headers.as_ref() {
+        for (k, v) in headers {
+            if let Some(v) = v.as_str() {
+                builder = builder.header(k, v);
+            }
+        }
+    }
+    if let Some(body) = req.body.as_ref() {
+        builder = builder.body(body.to_string());
+    }
+    match builder.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let mut text = resp.text().await.unwrap_or_default();
+            let truncated = text.len() > 2 * 1024 * 1024;
+            text.truncate(2 * 1024 * 1024);
+            Ok(Json(json!({ "status": status, "body": text, "truncated": truncated })))
+        }
+        Err(e) => Err(bad_request(format!("call failed: {e}")).into()),
+    }
+}
+
+/// `POST /api/srv/{board}/jobs`: `{"name", "schedule", "action"}` —
+/// action is `{"type":"http"|"poll","url","method"?,"headers"?,"body"?,
+/// "timeout_ms"?,"path"?}` (zw app_jobs shape).
+#[route(POST "/api/srv/{board_id}/jobs")]
+async fn api_job_add(Json(req): Json<JobForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let (Some(name), Some(schedule), Some(action)) = (
+        req.name.filter(|n| !n.is_empty()),
+        req.schedule.as_deref().filter(|s| !s.is_empty()),
+        req.action.as_ref(),
+    ) else {
+        return Err(bad_request("need name, schedule and action").into());
+    };
+    let store = app_context::<TursoStore>(cx);
+    let id = store
+        .job_add(raw, &name, schedule, action)
+        .await
+        .map_err(|e| bad_request(format!("job failed: {e}")))?;
+    Ok(Json(json!({ "id": id, "ok": true })))
+}
+
+/// `GET /api/srv/{board}/jobs`.
+#[route(GET "/api/srv/{board_id}/jobs")]
+async fn api_job_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let store = app_context::<TursoStore>(cx);
+    let jobs = store.job_list(raw).await.map_err(|e| bad_request(format!("jobs failed: {e}")))?;
+    Ok(Json(json!({ "items": jobs })))
+}
+
+/// `DELETE /api/srv/{board}/jobs/{id}`.
+#[route(DELETE "/api/srv/{board_id}/jobs/{job_id}")]
+async fn api_job_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let job_id: &str = path_param::<JobId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let Ok(id) = job_id.parse::<i64>() else {
+        return Err(bad_request("invalid job id").into());
+    };
+    let store = app_context::<TursoStore>(cx);
+    let removed = store.job_remove(raw, id).await.map_err(|e| bad_request(format!("job failed: {e}")))?;
+    Ok(Json(json!({ "removed": removed })))
+}
+
+/// `GET /api/srv/{board}/hooks/deliveries?status=&limit=` — retry queue.
+#[route(GET "/api/srv/{board_id}/hooks/deliveries")]
+async fn api_delivery_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let q = parse_query_params::<DeliveriesQuery>(cx).unwrap_or_default();
+    let store = app_context::<TursoStore>(cx);
+    let items = store
+        .delivery_list(raw, q.status.as_deref().filter(|s| !s.is_empty()), q.limit.unwrap_or(50).clamp(1, 500))
+        .await
+        .map_err(|e| bad_request(format!("deliveries failed: {e}")))?;
+    Ok(Json(json!({ "items": items })))
+}
+
+/// `POST /api/srv/{board}/hooks/replay`: `{"id"?}` — re-queue failed or
+/// dead deliveries (all of them when no id).
+#[route(POST "/api/srv/{board_id}/hooks/replay")]
+async fn api_delivery_replay(body: Body, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let bytes = topcoat::router::body_limit(cx);
+    let raw_body = topcoat::router::to_bytes(body, bytes).await.map_err(|e| bad_request(format!("body too large: {e}")))?;
+    let req: ReplayForm = if raw_body.is_empty() {
+        ReplayForm::default()
+    } else {
+        serde_json::from_slice(&raw_body).map_err(|e| bad_request(format!("replay body: {e}")))?
+    };
+    let store = app_context::<TursoStore>(cx);
+    let requeued = store
+        .delivery_replay(raw, req.id)
+        .await
+        .map_err(|e| bad_request(format!("replay failed: {e}")))?;
+    Ok(Json(json!({ "requeued": requeued })))
+}
+
+/// `GET /api/srv/{board}/config` — title/schema/ttl/rate/audit + more.
+#[route(GET "/api/srv/{board_id}/config")]
+async fn api_config_get(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let store = app_context::<TursoStore>(cx);
+    let config = store.board_config(raw).await.map_err(|e| bad_request(format!("config failed: {e}")))?;
+    Ok(Json(config))
+}
+
+/// `PUT /api/srv/{board}/ttl`: `{"seconds": N, "field": "expires_at"}` —
+/// records with `payload[field]` older than N seconds are hidden + swept.
+#[route(PUT "/api/srv/{board_id}/ttl")]
+async fn api_ttl_set(Json(req): Json<TtlForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let (Some(seconds), Some(field)) = (req.seconds, req.field.as_deref().filter(|f| !f.is_empty())) else {
+        return Err(bad_request("need seconds and field").into());
+    };
+    if seconds <= 0 {
+        return Err(bad_request("seconds must be positive").into());
+    }
+    let store = app_context::<TursoStore>(cx);
+    store.ttl_set(raw, seconds, field).await.map_err(|e| bad_request(format!("ttl failed: {e}")))?;
+    Ok(Json(json!({ "ok": true, "seconds": seconds, "field": field })))
+}
+
+/// `DELETE /api/srv/{board}/ttl` — disable TTL expiry.
+#[route(DELETE "/api/srv/{board_id}/ttl")]
+async fn api_ttl_clear(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let store = app_context::<TursoStore>(cx);
+    store.ttl_clear(raw).await.map_err(|e| bad_request(format!("ttl failed: {e}")))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `PUT /api/srv/{board}/audit`: `{"enabled": true|false}`.
+#[route(PUT "/api/srv/{board_id}/audit")]
+async fn api_audit_set(Json(req): Json<EnabledForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let store = app_context::<TursoStore>(cx);
+    store
+        .audit_enable(raw, req.enabled)
+        .await
+        .map_err(|e| bad_request(format!("audit failed: {e}")))?;
+    Ok(Json(json!({ "ok": true, "enabled": req.enabled })))
+}
+
+/// `GET /api/srv/{board}/audit?limit=` — the append-only audit trail.
+#[route(GET "/api/srv/{board_id}/audit")]
+async fn api_audit_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let q = parse_query_params::<LimitQuery>(cx).unwrap_or_default();
+    let store = app_context::<TursoStore>(cx);
+    let items = store.audit_list(raw, q.limit.unwrap_or(50).clamp(1, 1000)).await.map_err(|e| bad_request(format!("audit failed: {e}")))?;
+    Ok(Json(json!({ "items": items })))
+}
+
+/// `PUT /api/srv/{board}/rate`: `{"per_minute": N}` — in-memory sliding
+/// window per bucket (default bucket = "api").
+#[route(PUT "/api/srv/{board_id}/rate")]
+async fn api_rate_set(Json(req): Json<RateForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth_unlimited(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let Some(per_minute) = req.per_minute else {
+        return Err(bad_request("need per_minute").into());
+    };
+    if per_minute <= 0 {
+        return Err(bad_request("per_minute must be positive").into());
+    }
+    let store = app_context::<TursoStore>(cx);
+    store.rate_set(raw, per_minute).await.map_err(|e| bad_request(format!("rate failed: {e}")))?;
+    Ok(Json(json!({ "ok": true, "per_minute": per_minute })))
+}
+
+/// `DELETE /api/srv/{board}/rate` — disable rate limiting.
+#[route(DELETE "/api/srv/{board_id}/rate")]
+async fn api_rate_clear(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth_unlimited(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let store = app_context::<TursoStore>(cx);
+    store.rate_set(raw, 0).await.map_err(|e| bad_request(format!("rate failed: {e}")))?;
+    store.rate_reset(raw).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `GET /api/srv/{board}/dump` — the whole board (config + records +
+/// hooks + links) as one JSON document; `POST /restore` puts it back.
+#[route(GET "/api/srv/{board_id}/dump")]
+async fn api_dump(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let store = app_context::<TursoStore>(cx);
+    let dump = store.record_dump(raw).await.map_err(|e| bad_request(format!("dump failed: {e}")))?;
+    Ok(Json(dump))
+}
+
+#[route(POST "/api/srv/{board_id}/restore")]
+async fn api_restore(Json(dump): Json<serde_json::Value>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (_board, auth) = api_auth(cx, raw).await?;
+    requires(&auth, KeyRole::Admin)?;
+    let store = app_context::<TursoStore>(cx);
+    let counts = store.record_restore(raw, &dump).await.map_err(|e| bad_request(format!("restore failed: {e}")))?;
+    Ok(Json(counts))
+}
+
+// ---------------------------------------------------------------------------
+// Events (SSE) — realtime record stream with `after=`/`Last-Event-ID` resume
+// ---------------------------------------------------------------------------
+
+/// The SSE stream: replayed events first, then the live broadcast.
+struct EventStream {
+    replay: std::vec::IntoIter<serde_json::Value>,
+    rx: tokio::sync::broadcast::Receiver<String>,
+    filter: Option<String>,
+}
+
+impl futures_core::Stream for EventStream {
+    type Item = Result<Event>;
+
+    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        if let Some(data) = self.replay.next() {
+            let id = data.get("id").and_then(serde_json::Value::as_i64).unwrap_or(0).to_string();
+            let kind = data.get("event").and_then(serde_json::Value::as_str).unwrap_or("message");
+            return match Event::new().event(kind).id(id).json_data(&data) {
+                Ok(ev) => Poll::Ready(Some(Ok(ev))),
+                Err(e) => Poll::Ready(Some(Err(e))),
+            };
+        }
+        loop {
+            match self.rx.try_recv() {
+                Ok(raw) => {
+                    let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+                    if let Some(filter) = self.filter.as_deref() {
+                        let kind = value.get("event").and_then(Value::as_str).unwrap_or("");
+                        if kind != filter {
+                            continue;
+                        }
+                    }
+                    let id = value.get("seq").and_then(Value::as_i64).unwrap_or(0).to_string();
+                    let kind = value.get("event").and_then(Value::as_str).unwrap_or("message");
+                    return match Event::new().event(kind).id(id).json_data(&value) {
+                        Ok(ev) => Poll::Ready(Some(Ok(ev))),
+                        Err(e) => Poll::Ready(Some(Err(e))),
+                    };
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    // No poll API on this tokio's broadcast receiver: re-arm
+                    // a wakeup so we re-poll shortly after events land (the
+                    // spawned task never touches the receiver itself).
+                    let waker = cx.waker().clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        waker.wake();
+                    });
+                    return Poll::Pending;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+/// `GET /api/srv/{board}/events?after=&filter=` — the board's realtime
+/// event stream (`record.created/updated/deleted`). `after` (or the
+/// `Last-Event-ID` header) resumes from the newest events; `filter` keeps
+/// one kind only. Public on `public_reads` boards.
+#[route(GET "/api/srv/{board_id}/events")]
+async fn api_events(cx: &Cx) -> Result<Sse<impl Stream<Item = Result<Event>> + use<>>> {
+    let raw: &str = path_param::<BoardId>(cx);
+    let (board, auth) = api_auth(cx, raw).await?;
+    if !board.board_public_reads.unwrap_or(false) && auth.is_none() {
+        return Err(unauthorized().into());
+    }
+    let q = parse_query_params::<EventsQuery>(cx).unwrap_or_default();
+    let last_event = topcoat::router::content::sse::last_event_id(cx)
+        .and_then(|s| s.parse::<i64>().ok());
+    let after = q.after.or(last_event).unwrap_or(0).max(0);
+    let filter = q.filter.as_deref().filter(|f| !f.is_empty()).map(str::to_owned);
+    let store = app_context::<TursoStore>(cx);
+    let replay = store
+        .event_replay(raw, after, filter.as_deref(), 500)
+        .await
+        .map_err(|e| bad_request(format!("events failed: {e}")))?;
+    let replay_values: Vec<Value> = replay
+        .into_iter()
+        .map(|(id, kind, seq, payload)| json!({
+            "id": id,
+            "event": kind,
+            "seq": seq,
+            "payload": serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null),
+        }))
+        .collect();
+    let rx = store.subscribe(raw).await;
+    Ok(Sse::new(EventStream {
+        replay: replay_values.into_iter(),
+        rx,
+        filter,
+    })
+    .keep_alive(KeepAlive::new()))
+}
+
+// ---------------------------------------------------------------------------
+// CORS preflight
+// ---------------------------------------------------------------------------
+
+fn cors_headers(cx: &Cx) -> topcoat::router::HeaderMap {
+    let mut cors = topcoat::router::HeaderMap::new();
+    cors.insert(
+        "access-control-allow-origin",
+        headers(cx)
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("*")
+            .parse()
+            .unwrap(),
+    );
+    cors.insert("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS".parse().unwrap());
+    cors.insert("access-control-allow-headers", "authorization, content-type, x-srv-key, last-event-id".parse().unwrap());
+    cors.insert("access-control-max-age", "86400".parse().unwrap());
+    cors
+}
+
+macro_rules! cors_routes {
+    ($( $name:ident => $path:literal ),* $(,)?) => {
+        $(
+            #[route(OPTIONS $path)]
+            async fn $name(cx: &Cx) -> Result<impl IntoResponse> {
+                let (cors, body) = (cors_headers(cx), Body::empty());
+                Ok((cors, body))
+            }
+        )*
+    };
+}
+
+cors_routes! {
+    cors_records => "/api/srv/{board_id}/records",
+    cors_record_seq => "/api/srv/{board_id}/records/{seq}",
+    cors_record_bulk => "/api/srv/{board_id}/records/bulk",
+    cors_record_links => "/api/srv/{board_id}/records/{seq}/links",
+    cors_aggregate => "/api/srv/{board_id}/aggregate",
+    cors_call => "/api/srv/{board_id}/call",
+    cors_events => "/api/srv/{board_id}/events",
+    cors_keys => "/api/srv/{board_id}/keys",
+    cors_key_revoke => "/api/srv/{board_id}/keys/{bucket}/revoke",
+    cors_hooks => "/api/srv/{board_id}/hooks",
+    cors_deliveries => "/api/srv/{board_id}/hooks/deliveries",
+    cors_replay => "/api/srv/{board_id}/hooks/replay",
+    cors_jobs => "/api/srv/{board_id}/jobs",
+    cors_job_seq => "/api/srv/{board_id}/jobs/{job_id}",
+    cors_config => "/api/srv/{board_id}/config",
+    cors_ttl => "/api/srv/{board_id}/ttl",
+    cors_audit => "/api/srv/{board_id}/audit",
+    cors_rate => "/api/srv/{board_id}/rate",
+    cors_dump => "/api/srv/{board_id}/dump",
+    cors_restore => "/api/srv/{board_id}/restore",
+}
+
+// ---------------------------------------------------------------------------
 // MCP tool: ONE `cli` tool, zerowrapper-style (help layers + argv parsing).
 // Public: catalog, doc, guide. Mutations: `POST /api/srv/mcp` behind
 // `x-srv-key` — the id in the key must match the space id in the command.
@@ -1812,9 +2954,9 @@ fn mcp_guide() -> serde_json::Value {
             {"heading": "2. Create the space (web)",
              "body": "Sign in, open Portal → Spaces (or /sl) and create a board. The one-time owner key is shown once in the redirect URL: /sl/<space_id>?owner_key=<secret> — copy it."},
             {"heading": "3. Configure your MCP client",
-             "body": "Register one tool: url /api/srv/mcp, method POST, header x-srv-key: <space_id>:owner:<secret> (the one-time owner key from creation) — or <space_id>:<bucket>:<secret> for an issued scoped key (cli keys issue). Request body {\"tool\":\"cli\",\"params\":{\"args\":[...]}}. Every command manages the space in the header — the --space flag is optional and must match when given. Sanity check: curl -X POST /api/srv/mcp -H \"content-type: application/json\" -H \"x-srv-key: <space_id>:owner:<key>\" -d '{\"tool\":\"cli\",\"params\":{\"args\":[\"space\",\"show\"]}}'."},
+             "body": "EASY MODE (no config JSON): hand the agent the ONE key string from the space page (<space_id>:owner:<secret> or an issued <space_id>:<bucket>:<token>) — it passes it as the id: cli space show --space <space_id>:owner:<secret> (or --key …). The leading part is the space id; the rest authenticates the call itself, so the client just points at the url and the agent drives the space. HEADER MODE: register one tool with header x-srv-key: <space_id>:owner:<secret> and every command manages the space in the header. Request body {\"tool\":\"cli\",\"params\":{\"args\":[...]}}. Sanity check: curl -X POST /api/srv/mcp -H \"content-type: application/json\" -d '{\"tool\":\"cli\",\"params\":{\"args\":[\"space\",\"show\",\"--space\",\"<space_id>:owner:<key>\"]}}'."},
             {"heading": "4. First call",
-             "body": "cli space show → meta + record count for your space. Running `cli` with no args prints the overview; all help layers are PUBLIC (no key needed): cli --help, cli help <group>, cli help <group> <verb> and /api/srv/mcp/guide — read them before you own a space."},
+             "body": "cli space show → meta + record count for your space (with the key string as --space, or plain with the header). Running `cli` with no args prints the overview; all help layers are PUBLIC (no key needed): cli --help, cli help <group>, cli help <group> <verb> and /api/srv/mcp/guide — read them before you own a space."},
             {"heading": "5. Upload a build and deploy",
              "body": "For each file of your dist/: cli space files upload <path> --content <base64>. Then cli space deploy --publish on. The staging build is copied to dist/ and the space goes live at /s/<space_id>."},
             {"heading": "6. Records + webhooks",
@@ -1839,26 +2981,220 @@ async fn mcp_run(Json(req): Json<McpInvoke>, cx: &Cx) -> Result<Json<serde_json:
     if let Some(value) = cli::help_response(&args) {
         return Ok(Json(value));
     }
-    let Some(token) = headers(cx)
+    let store = app_context::<TursoStore>(cx);
+    // The call may carry its own key — `--key` or `--space <composite>`
+    // (the console's one copyable string <space_id>:<bucket>:<secret>); the
+    // x-srv-key header is then optional, but when both exist they must name
+    // the same space.
+    let embedded = cli::embedded_key(&args);
+    let header_token = headers(cx)
         .get("x-srv-key")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
-        .filter(|t| !t.is_empty())
-    else {
-        return Err(unauthorized().into());
+        .filter(|t| !t.is_empty());
+    let (token, board_id) = match (embedded, header_token) {
+        (Some((board, token)), Some(header)) => {
+            let header_board = header.split(':').next().unwrap_or_default();
+            if header_board != board {
+                return Ok(Json(json!({
+                    "status": "error",
+                    "error": format!("key mismatch: the header is for {header_board}, the passed --space/--key string is for {board}"),
+                    "hint": "use one key only — either the x-srv-key header or the string passed in the call"
+                })));
+            }
+            (token, board)
+        }
+        (Some((board, token)), None) => (token, board),
+        (None, Some(header)) => (header.to_string(), header.split(':').next().unwrap_or_default().to_string()),
+        (None, None) => return Err(unauthorized().into()),
     };
-    let board_id = token.split(':').next().unwrap_or_default();
-    if board_row(cx, board_id).await?.is_none() {
+    if board_row(cx, &board_id).await?.is_none() {
         return Err(not_found().into());
     }
-    let Some(auth) = resolve_key(cx, board_id, token).await? else {
+    let Some(auth) = resolve_key(cx, &board_id, &token).await? else {
         return Err(unauthorized().into());
     };
-    let store = app_context::<TursoStore>(cx);
-    let cli = cli::Cli { cx, store, key_board: board_id.to_string(), auth };
+    let cli = cli::Cli { cx, store, key_board: board_id, auth };
     match cli.run(&args).await {
         Ok(value) => Ok(Json(value)),
         Err(value) => Ok(Json(value)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native MCP over HTTP: `POST /mcp` speaks real MCP JSON-RPC (streamable-HTTP
+// style) so any MCP client (opencode `type: "remote"`, Claude, …) points
+// straight at the URL — no stdio bridge. ONE `cli` tool, same CLI + help
+// layers as the envelope endpoint. Commands authenticate with the
+// `x-srv-key` header — `<space_id>:owner:<secret>` or
+// `<space_id>:<bucket>:<token>` — whose leading id IS the space being
+// managed (--space is optional and must match), so the agent manages a space
+// with the key alone. All help layers are public and need no key.
+// ---------------------------------------------------------------------------
+
+/// The MCP protocol version this server speaks.
+const MCP_PROTOCOL: &str = "2025-06-18";
+
+/// One JSON-RPC request body, leniently parsed (`id` optional for
+/// notifications, `params` optional for `ping`).
+#[derive(Deserialize)]
+struct McpRpcMessage {
+    id: Option<serde_json::Value>,
+    #[serde(default)]
+    method: String,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+}
+
+fn mcp_ok(id: Option<serde_json::Value>, result: serde_json::Value) -> serde_json::Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn mcp_error(id: Option<serde_json::Value>, code: i32, message: &str) -> serde_json::Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// A tool result: text content, flagged as an error when the CLI failed.
+fn mcp_tool_result(id: Option<serde_json::Value>, text: String, is_error: bool) -> serde_json::Value {
+    mcp_ok(
+        id,
+        json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }),
+    )
+}
+
+/// The single `cli` tool's MCP definition (same shape as the bridge had).
+fn mcp_cli_tool() -> serde_json::Value {
+    json!({
+        "name": "cli",
+        "description": "Serverless-spaces CLI for LANsystem: deploy and manage a space (build files, records, keys, hooks). \
+Syntax: cli <group> <verb> [args] with groups space/records/keys/hooks. Every command manages the space in the \
+x-srv-key header (--space is optional and must match when given). NO-HEADER MODE: pass the space's key string \
+as the id and the call authenticates itself — cli space show --space <space_id>:owner:<secret> (or \
+--key <composite> / an issued <space_id>:<bucket>:<token>); the leading part is the space id. \
+ALL help layers are PUBLIC (no key): cli, cli about, cli --help, cli help <group>, cli help <group> <verb>.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "CLI tokens, e.g. ['space','show'] or ['space','show','--space','<space_id>:owner:<secret>'] or ['help','space']"
+                }
+            },
+            "required": ["args"]
+        }
+    })
+}
+
+/// `GET /mcp`: human/agent-readable catalog; MCP clients use `POST /mcp`.
+#[route(GET "/mcp")]
+async fn mcp_http_catalog(cx: &Cx) -> Result<Json<serde_json::Value>> {
+    Ok(Json(json!({
+        "mcp": "serverless-spaces",
+        "transport": "JSON-RPC over HTTP (MCP protocol 2025-06-18)",
+        "endpoint": "POST /mcp  (initialize | tools/list | tools/call | ping)",
+        "tool": mcp_cli_tool(),
+        "auth": "header x-srv-key: <space_id>:owner:<secret> or <space_id>:<bucket>:<token> — commands only; each help layer is public. NO-HEADER MODE: pass the key string as the id in the call (cli space show --space <space_id>:owner:<secret> / --key) — that string IS the credential, no config JSON needed",
+        "clients": [
+            "opencode: {\"mcp\":{\"lansrv-spaces\":{\"type\":\"remote\",\"url\":\"http://<host>:4321/mcp\"}}}",
+            "claude: mcpServers lansrv-spaces type http url http://<host>:4321/mcp"
+        ]
+    })))
+}
+
+/// `POST /mcp`: the real MCP endpoint — one `cli` tool, help layers public.
+#[route(POST "/mcp")]
+async fn mcp_http_rpc(Json(raw): Json<serde_json::Value>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+    // A non-json-rpc body should still answer as a JSON-RPC parse error.
+    let Ok(msg) = serde_json::from_value::<McpRpcMessage>(raw) else {
+        return Ok(Json(mcp_error(None, -32700, "Parse error: expected a JSON-RPC request")));
+    };
+    let id = msg.id.clone();
+    match msg.method.as_str() {
+        "initialize" => Ok(Json(mcp_ok(
+            id,
+            json!({
+                "protocolVersion": MCP_PROTOCOL,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "lansrv-spaces", "version": "1.0.0" },
+            }),
+        ))),
+        "notifications/initialized" | "notifications/cancelled" => Ok(Json(serde_json::Value::Null)),
+        "ping" => Ok(Json(mcp_ok(id, json!({})))),
+        "tools/list" => Ok(Json(mcp_ok(id, json!({ "tools": [mcp_cli_tool()] })))),
+        "tools/call" => {
+            let params = msg.params.unwrap_or_else(|| json!({}));
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+            if name != "cli" {
+                return Ok(Json(mcp_error(id, -32601, "Method not found: tools/call for unknown tool")));
+            }
+            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            // Reuse the envelope's tokenizer (array of tokens or one string).
+            let envelope = McpInvoke { tool: "cli".to_string(), params: arguments.as_object().cloned().unwrap_or_default() };
+            let args = envelope.args_list();
+            // Help layers are public — no key needed.
+            if let Some(value) = cli::help_response(&args) {
+                return Ok(Json(mcp_tool_result(id, serde_json::to_string(&value).unwrap_or_default(), false)));
+            }
+            let store = app_context::<TursoStore>(cx);
+            // Commands need a key. It may be the x-srv-key header, OR the
+            // key string itself passed as the id (`--key`/`--space
+            // <space_id>:<bucket>:<secret>`) — the console's one copyable
+            // string, so a client needs NO config JSON. When both exist
+            // they must name the same space.
+            let embedded = cli::embedded_key(&args);
+            let header_token = headers(cx)
+                .get("x-srv-key")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|t| !t.is_empty());
+            let (token, board_id) = match (embedded, header_token) {
+                (Some((board, token)), Some(header)) => {
+                    let header_board = header.split(':').next().unwrap_or_default();
+                    if header_board != board {
+                        let text = serde_json::to_string(&json!({
+                            "status": "error",
+                            "error": format!("key mismatch: the header is for {header_board}, the passed --space/--key string is for {board}"),
+                            "hint": "use one key only — either the x-srv-key header or the string passed in the call"
+                        })).unwrap_or_default();
+                        return Ok(Json(mcp_tool_result(id, text, true)));
+                    }
+                    (token, board)
+                }
+                (Some((board, token)), None) => (token, board),
+                (None, Some(header)) => (header.to_string(), header.split(':').next().unwrap_or_default().to_string()),
+                (None, None) => {
+                    let text = serde_json::to_string(&json!({
+                        "status": "error",
+                        "error": "401: no key — no x-srv-key header and no key string in the call",
+                        "hint": "set the header x-srv-key: <space_id>:owner:<secret>, or pass the key string as the id: cli space show --space <space_id>:owner:<secret>; help layers need no key"
+                    })).unwrap_or_default();
+                    return Ok(Json(mcp_tool_result(id, text, true)));
+                }
+            };
+            if board_row(cx, &board_id).await?.is_none() {
+                let text = serde_json::to_string(&json!({
+                    "status": "error",
+                    "error": "404: unknown space id in key",
+                    "hint": "create a space on the web at /sl (or /portal/serverless) and copy its one-time owner key"
+                })).unwrap_or_default();
+                return Ok(Json(mcp_tool_result(id, text, true)));
+            }
+            let Some(auth) = resolve_key(cx, &board_id, &token).await? else {
+                let text = serde_json::to_string(&json!({
+                    "status": "error",
+                    "error": "401: bad or revoked key",
+                    "hint": "issue a scoped key (cli keys issue) or use the owner key from the create redirect"
+                })).unwrap_or_default();
+                return Ok(Json(mcp_tool_result(id, text, true)));
+            };
+            let cli = cli::Cli { cx, store, key_board: board_id, auth };
+            match cli.run(&args).await {
+                Ok(value) => Ok(Json(mcp_tool_result(id, serde_json::to_string(&value).unwrap_or_default(), false))),
+                Err(value) => Ok(Json(mcp_tool_result(id, serde_json::to_string(&value).unwrap_or_default(), true))),
+            }
+        }
+        other => Ok(Json(mcp_error(id, -32601, &format!("Method not found: {other}")))),
     }
 }
 
@@ -1970,6 +3306,193 @@ struct ListQuery {
     before: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    eq: Option<String>,
+    #[serde(default)]
+    filter: Option<String>,
+    #[serde(default)]
+    order: Option<String>,
+    #[serde(default)]
+    desc: Option<String>,
+    #[serde(default)]
+    hl: Option<String>,
+}
+
+/// `PATCH /records/{seq}` body: the JSON-patch ops object.
+#[derive(Deserialize)]
+struct PatchForm {
+    patch: serde_json::Value,
+}
+
+/// `GET /aggregate` query params.
+#[derive(Deserialize, Default)]
+struct AggregateQuery {
+    #[serde(default)]
+    op: Option<String>,
+    #[serde(default)]
+    field: Option<String>,
+    #[serde(default)]
+    group_by: Option<String>,
+    #[serde(default)]
+    filter: Option<String>,
+}
+
+/// `POST /records/bulk` body.
+#[derive(Deserialize)]
+struct BulkInsert {
+    #[serde(alias = "items")]
+    payloads: Vec<serde_json::Value>,
+}
+
+/// `DELETE /records?filter=` query param.
+#[derive(Deserialize)]
+struct FilterQuery {
+    filter: Option<String>,
+}
+
+/// `POST /call` body.
+#[derive(Deserialize)]
+struct CallBody {
+    url: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    body: Option<serde_json::Value>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+/// `POST /jobs` body.
+#[derive(Deserialize)]
+struct JobForm {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    schedule: Option<String>,
+    #[serde(default)]
+    action: Option<serde_json::Value>,
+}
+
+/// `GET /hooks/deliveries` query params.
+#[derive(Deserialize, Default)]
+struct DeliveriesQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `POST /hooks/replay` body.
+#[derive(Deserialize, Default)]
+struct ReplayForm {
+    #[serde(default)]
+    id: Option<i64>,
+}
+
+/// `PUT /ttl` body.
+#[derive(Deserialize)]
+struct TtlForm {
+    seconds: Option<i64>,
+    #[serde(default)]
+    field: Option<String>,
+}
+
+/// `PUT /audit` body.
+#[derive(Deserialize)]
+struct EnabledForm {
+    enabled: bool,
+}
+
+/// `PUT /rate` body.
+#[derive(Deserialize)]
+struct RateForm {
+    per_minute: Option<i64>,
+}
+
+/// `POST /sl/{board}/jobs/add` form — the action arrives as a JSON string.
+#[derive(Deserialize)]
+struct WebJobForm {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    schedule: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+}
+
+/// `POST /sl/{board}/jobs/remove` form.
+#[derive(Deserialize)]
+struct JobIdForm {
+    #[serde(default)]
+    id: Option<i64>,
+}
+
+/// `POST /sl/{board}/audit` form — checkbox value is `on`/`off`.
+#[derive(Deserialize)]
+struct WebEnabledForm {
+    #[serde(default)]
+    enabled: Option<String>,
+}
+
+/// `POST /sl/{board}/restore` form — dump JSON in a textarea.
+#[derive(Deserialize)]
+struct RestoreForm {
+    dump: String,
+}
+
+/// `GET /sl/{board}` — records view controls.
+#[derive(Deserialize, Default)]
+struct BoardQuery {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    filter: Option<String>,
+    #[serde(default)]
+    order: Option<String>,
+    #[serde(default)]
+    desc: Option<String>,
+    #[serde(default)]
+    agg_op: Option<String>,
+    #[serde(default)]
+    agg_field: Option<String>,
+    #[serde(default)]
+    agg_group: Option<String>,
+}
+
+/// `GET /audit?limit=` query param.
+#[derive(Deserialize, Default)]
+struct LimitQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// `POST /records/{seq}/links` body.
+#[derive(Deserialize)]
+struct LinkForm {
+    parent: Option<i64>,
+    #[serde(default)]
+    via: Option<String>,
+}
+
+/// `DELETE /records/{seq}/links?via=` query param.
+#[derive(Deserialize)]
+struct ViaQuery {
+    via: Option<String>,
+}
+
+/// `GET /events?after=&filter=` query params.
+#[derive(Deserialize, Default)]
+struct EventsQuery {
+    #[serde(default)]
+    after: Option<i64>,
+    #[serde(default)]
+    filter: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2054,8 +3577,23 @@ fn infer_image_content_type(file_name: &str) -> &'static str {
     }
 }
 
+/// Accept `1|true|on|yes` as truthy query values (curl-friendly).
+fn truthy(s: &str) -> bool {
+    matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+}
+
+/// Read a string key from a JSON row (jobs/deliveries/config), blank when missing.
+fn jv_str(v: &Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).map(str::to_string).unwrap_or_default()
+}
+
+/// Read an integer key from a JSON row, 0 when missing.
+fn jv_i64(v: &Value, key: &str) -> i64 {
+    v.get(key).and_then(|x| x.as_i64()).unwrap_or(0)
+}
+
 fn empty_to_none(s: Option<&str>) -> Option<&str> {
-    s.filter(|s| !s.trim().is_empty())
+    s.filter(|v| !v.trim().is_empty())
 }
 
 /// `sl-{millis:x}-{counter:04x}` — locally-unique enough for a LAN (same

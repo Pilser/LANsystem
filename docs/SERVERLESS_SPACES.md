@@ -138,6 +138,11 @@ endpoint. Creating the space (web) auto-generates the owner key / API keys —
 the user copies the token into their MCP client and can then manage the whole
 space **including deploying** from the MCP tool.
 
+The app-runner surface (records math + substring search, realtime SSE,
+outbound calls, cron jobs, webhook retry queue, config/export, console
+panels) is **implemented** — see `SERVERLESS_MCP.md` §6 for the full
+feature/status table and the E2E verification notes.
+
 ## 9. Implementation order
 
 1. `crates/db/src/schema.rs` — new props (`BOARD_DESCRIPTION`, `BOARD_ICON_KEY`,

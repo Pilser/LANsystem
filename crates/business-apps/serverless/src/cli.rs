@@ -7,6 +7,13 @@
 //! bugs. The help layers are fully public: an agent can read the whole
 //! documentation without owning a space or a key; only the actions need the
 //! space id (which must match the id inside the `x-srv-key` token).
+//!
+//! No-header mode: the `--space`/`--space-id`/`--key` value may be the
+//! console's ONE copyable string — `<space_id>:owner:<secret>` or
+//! `<space_id>:<bucket>:<secret>` — which authenticates the call itself
+//! (`embedded_key`), so a client pointed at the URL with no config JSON
+//! works: `cli space show --space <the-string>`. The agent just passes the
+//! id it was given.
 
 use base64::Engine as _;
 use bytes::Bytes;
@@ -35,19 +42,25 @@ usage: cli <group> <verb> [args]
        cli help <group> <verb>       per-verb help (e.g. `cli help records insert`)
 
 groups:
-  space     show / update / deploy / files / media / delete  the space itself
-  records   insert / list / get / delete / count             the space's records
+  space     show / update / deploy / files / media / delete /  the space itself
+            jobs / ttl / audit / rate / link / config /
+            dump / restore
+  records   insert / set / patch / list / get / delete /      the space's records
+            query / filter / search / aggregate / bulk / call / count
   keys      issue / revoke / list                            scoped API keys
-  hooks     register                                          webhooks
+  hooks     register / list / remove / deliveries / replay    webhooks
 
 the space id is OPTIONAL — your key identifies the space:
   cli space show                      manage this key's space (no --space needed)
   cli space show --space sl-...       same, explicit (must match the key)
+  cli space show --space sl-..:owner:...   pass the ONE console string — the
+                                           leading part IS the space id, the
+                                           rest authenticates (no header needed)
 find a space's id on the space page (top right, next to the title — copy
 button included), or in the create redirect /sl/<space_id>?owner_key=....
 auth: pass the `x-srv-key: <space_id>:owner:<secret>` header (or a scoped
-`<space_id>:<bucket>:<secret>` key). The HELP layers above need NO key at
-all — they are public.";
+`<space_id>:<bucket>:<secret>` key), OR the key string itself as the --space
+value above. The HELP layers above need NO key at all — they are public.";
 
 /// `cli about` — what a space is and how the tool fits.
 pub const ABOUT: &str = "\
@@ -60,12 +73,14 @@ How to get started:
      Spaces tab). The space page shows the space id (copyable) and the
      redirect URL carries the one-time owner key:
      /sl/<space_id>?owner_key=<secret>.
-   2. Give your agent two things: the space id and the key. Configure the
-      MCP server once (see the guide): url /api/srv/mcp, header
-      x-srv-key: <space_id>:owner:<secret> (or an issued scoped token).
-      With that header the agent can manage the whole space — every command
-      defaults to the key's space, so `cli space show` already works.
-   3. Verify:  cli space show
+2. Give your agent the ONE string the space page shows — the key
+       (redirect URL /sl/<space_id>?owner_key=<secret>). Either configure
+       the MCP server once with header x-srv-key: <space_id>:owner:<secret>
+       (or an issued scoped token), or just pass the string as the id in
+       each call: cli space show --space <space_id>:owner:<secret>.
+       Either way every command defaults to that space, so `cli space show`
+       alone also works.
+    3. Verify:  cli space show
    4. Ship a build: cli space files upload index.html --content <b64>
                   cli space deploy --publish on
    5. Mint scoped keys for other apps: cli keys issue --role writer
@@ -83,6 +98,14 @@ usage: cli space <verb> [--space <space_id>] [args]
           [--space <id>] upload <path> --content <base64>
           [--space <id>] remove <path>                   (staging only)
   media   [--space <id>] [--icon <b64>] [--banner <b64>] [--gallery <b64>]* [--clear-gallery]
+  config  [--space <id>]                                 board config (ttl/rate/audit flags)
+  jobs    [--space <id>] add|list|remove                 cron jobs (admin)
+  ttl     [--space <id>] set|clear                       record expiry (admin)
+  audit   [--space <id>] on|off|list                     audit trail (admin)
+  rate    [--space <id>] set|clear                       in-memory rate limit (admin)
+  link    [--space <id>] set|clear|show                  record parent links (admin/writer)
+  dump    [--space <id>]                                 export the board as JSON (admin)
+  restore [--space <id>] --dump '<json>'                 import a dump (admin)
   delete  [--space <id>]                                 permanently delete the space
 --space defaults to the space your key belongs to; pass it explicitly only
 to be safe. per-verb help: cli help space <verb>";
@@ -90,9 +113,17 @@ to be safe. per-verb help: cli help space <verb>";
 const RECORDS_USAGE: &str = "\
 usage: cli records <verb> [--space <space_id>] [args]
   insert  [--space <id>] '<json>' [--writer <w>] [--upsert]
-  list    [--space <id>] [--limit N] [--offset N]
+  set     [--space <id>] --seq N '<json>'               replace a record's payload
+  patch   [--space <id>] --seq N '<patch>'              apply $set/$inc/$dec/$mul/$unset ops
+  list    [--space <id>] [--limit N] [--offset N] [--q text] [--filter '<json>'] [--order path] [--hl]
   get     [--space <id>] --seq N
-  delete  [--space <id>] --seq N
+  query   [--space <id>] --path a.b [--eq <json>] [--limit N] [--offset N]
+  filter  [--space <id>] --filter '<json>' [--order path [--asc|--desc]] [--limit N] [--offset N]
+  search  [--space <id>] --q text [--hl] [--limit N] [--offset N]
+  aggregate [--space <id>] --op count|sum|avg|min|max --field a.b [--group-by c] [--filter '<json>']
+  bulk    [--space <id>] '<json>' '<json>' ...          insert many at once
+  call    [--space <id>] <url> [--method M] [--body '<json>'] [--timeout-ms N]
+  delete  [--space <id>] --seq N | --filter '<json>'    one record or filter match
   count   [--space <id>]
 --space defaults to the space your key belongs to.
 per-verb help: cli help records <verb>";
@@ -108,6 +139,10 @@ per-verb help: cli help keys <verb>";
 const HOOKS_USAGE: &str = "\
 usage: cli hooks <verb> [--space <space_id>] [args]
   register [--space <id>] <url> [--secret <s>]
+  list     [--space <id>]
+  remove   [--space <id>] --url <url>
+  deliveries [--space <id>] [--status pending|ok|dead] [--limit N]   retry queue
+  replay   [--space <id>] [--id N]                      re-queue failed deliveries
 --space defaults to the space your key belongs to.
 per-verb help: cli help hooks <verb>";
 
@@ -141,6 +176,45 @@ cli space media [--space <space_id>] [--icon <b64>] [--banner <b64>] [--gallery 
 sets the space's icon, banner and/or gallery photos (base64 PNG/JPEG/WebP).
 --gallery appends one photo per occurrence; --clear-gallery removes every
 gallery photo first. Unsupplied flags keep current values. admin+ role."),
+        ("space", "config") => Some("\
+cli space config [--space <space_id>]
+prints the board config: title, public_reads, unique key, ttl, rate, audit.
+admin+ role."),
+        ("space", "jobs") => Some("\
+cli space jobs add --name n --schedule '*/10 * * * *' --action '{\"type\":\"poll\",\"url\":\"https://...\",\"path\":\"$.a.b\"}'
+cli space jobs list
+cli space jobs remove --id N
+cron jobs: 5-field schedules plus '@every 30s'. action is
+{\"type\":\"http\"|\"poll\",\"url\",\"method\"?,\"headers\"?,\"body\"?,
+\"timeout_ms\"?,\"path\"?} - poll extracts a JSON path from the response
+and stores it as a record. The scheduler runs every 15s. admin+ role."),
+        ("space", "ttl") => Some("\
+cli space ttl set --seconds N --field expires_at
+cli space ttl clear
+records whose payload[field] (unix seconds) is older than N are hidden
+from reads and swept every 30s. admin+ role."),
+        ("space", "audit") => Some("\
+cli space audit on | off  |  list [--limit N]
+append-only audit trail (action, seq, payload sha256) when enabled.
+admin+ role."),
+        ("space", "rate") => Some("\
+cli space rate set --per-minute N | clear
+in-memory sliding-window request cap per minute for the board's API
+(default bucket). admin+ role."),
+        ("space", "link") => Some("\
+cli space link set --seq N --parent M --via x
+cli space link clear --seq N --via x
+cli space link show --seq N
+record parent links: record N points at record M through 'via'.
+writer+ for set/clear, reader+ for show."),
+        ("space", "dump") => Some("\
+cli space dump [--space <space_id>]
+exports the whole board (config + records + hooks + links) as JSON.
+admin+ role."),
+        ("space", "restore") => Some("\
+cli space restore [--space <space_id>] --dump '<json>'
+imports a dump (explicit seqs preserved; hooks and config restored).
+admin+ role."),
         ("space", "delete") => Some("\
 cli space delete [--space <space_id>]
 permanently deletes the space: catalog tombstone, records, keys, hooks and
@@ -158,6 +232,30 @@ fetches one record by its seq. reader+ role."),
         ("records", "delete") => Some("\
 cli records delete [--space <space_id>] --seq N
 deletes one record by seq. writer+ role."),
+        ("records", "set") => Some("cli records set [--space <space_id>] --seq N '<json>'
+replaces the whole payload of record N. writer+ role."),
+        ("records", "patch") => Some("cli records patch [--space <space_id>] --seq N '<patch>'
+applies Mongo-ish ops in place: {\"$set\":{\"a\":1,\"b.c\":2},
+\"$inc\":{\"n\":1},\"$dec\":{\"n\":1},\"$mul\":{\"n\":2},
+\"$unset\":[\"x\"]}. Returns the updated payload. writer+ role."),
+        ("records", "query") => Some("cli records query [--space <space_id>] --path a.b[2].c [--eq <json>] [--limit N] [--offset N]
+returns every record where the JSON path exists (optionally equal to --eq).
+reader+ role."),
+        ("records", "filter") => Some("cli records filter [--space <space_id>] --filter '<json>' [--order path [--asc|--desc]] [--limit N] [--offset N]
+filter is a condition or an and-list: [{\"field\":\"a.b\",\"op\":\"gt\",
+\"value\":100}] with ops eq|neq|gt|gte|lt|lte|contains|not_contains|in.
+reader+ role."),
+        ("records", "search") => Some("cli records search [--space <space_id>] --q text [--hl] [--limit N] [--offset N]
+full-text-ish substring search over the raw payload; --hl wraps matches
+in <mark>. reader+ role."),
+        ("records", "aggregate") => Some("cli records aggregate [--space <space_id>] --op count|sum|avg|min|max --field a.b [--group-by c] [--filter '<json>']
+aggregates the JSON path's numbers across records, optionally grouped by
+another path. reader+ role."),
+        ("records", "bulk") => Some("cli records bulk [--space <space_id>] '<json>' '<json>' ...
+inserts many records at once (each gets its own seq). writer+ role."),
+        ("records", "call") => Some("cli records call [--space <space_id>] <url> [--method M] [--body '<json>'] [--timeout-ms N]
+server-side HTTP call (SSRF-guarded: public http(s) only) returning the
+status and body. writer+ role."),
         ("records", "count") => Some("\
 cli records count [--space <space_id>]
 prints the record row count. reader+ role."),
@@ -171,6 +269,16 @@ revokes a scoped key by its bucket id. admin+ role."),
         ("keys", "list") => Some("\
 cli keys list [--space <space_id>]
 lists every scoped key (bucket, role, writer label, created_at). admin+ role."),
+        ("hooks", "list") => Some("cli hooks list [--space <space_id>]
+lists registered webhook URLs. admin+ role."),
+        ("hooks", "remove") => Some("cli hooks remove [--space <space_id>] --url <url>
+unregisters a webhook (pending deliveries are not dropped). admin+ role."),
+        ("hooks", "deliveries") => Some("cli hooks deliveries [--space <space_id>] [--status pending|ok|dead] [--limit N]
+lists the webhook delivery queue: id, url, event, seq, attempt, status,
+last_message. pending retries with backoff 2^n s (dead after 5 tries).
+admin+ role."),
+        ("hooks", "replay") => Some("cli hooks replay [--space <space_id>] [--id N]
+re-queues failed or dead deliveries (all of them without --id). admin+ role."),
         ("hooks", "register") => Some("\
 cli hooks register [--space <space_id>] <url> [--secret <s>]
 registers a webhook URL (signed with an optional secret). admin+ role."),
@@ -316,6 +424,23 @@ impl<'a> Args<'a> {
     }
 }
 
+/// Extract an embedded key from tool args: `--key <composite>` or
+/// `--space` / `--space-id <composite>` where the value is a full key string
+/// `<space_id>:<bucket>:<secret>` (the console's one copyable string).
+/// Returns the space id it names and the whole token, so an endpoint can
+/// authenticate a call with NO header at all — that single string IS the
+/// credential, and the agent only ever "passes the id".
+pub fn embedded_key(tokens: &[String]) -> Option<(String, String)> {
+    let args = Args { tokens, pos: 0 };
+    let raw = args
+        .val_after("--key")
+        .or_else(|| args.val_after("--space"))
+        .or_else(|| args.val_after("--space-id"))?;
+    let parts: Vec<String> = raw.split(':').map(str::to_string).collect();
+    (parts.len() == 3 && parts.iter().all(|p| !p.is_empty()))
+        .then(|| (parts[0].clone(), raw))
+}
+
 fn err_json(error: &str, command: &str, usage: &str, hint: &str) -> Value {
     json!({
         "status": "error",
@@ -347,12 +472,16 @@ impl<'a> Cli<'a> {
     /// The space id is passed as a flag on every task — but it defaults to
     /// the space the key belongs to, so `cli space show` alone manages that
     /// space fully. An explicit `--space` must match the key's space
-    /// (enforced by `board`).
+    /// (enforced by `board`). The value may be the ONE-STRING key copied
+    /// from the console — `<space_id>:owner:<secret>` or
+    /// `<space_id>:<bucket>:<token>` — in which case only the leading id is
+    /// the space (the endpoint already authenticated with the whole string).
     fn space_arg(&self, args: &mut Args<'_>, _command: &str, _usage: &str) -> Result<String, Value> {
         Ok(args
             .val_after("--space")
             .or_else(|| args.val_after("--space-id"))
             .filter(|s| !s.is_empty())
+            .map(|s| s.split(':').next().unwrap_or_default().to_string())
             .unwrap_or_else(|| self.key_board.clone()))
     }
 
@@ -399,15 +528,35 @@ impl<'a> Cli<'a> {
             ("space", "files") => self.space_files(&mut args, &command).await,
             ("space", "media") => self.space_media(&mut args, &command).await,
             ("space", "delete") => self.space_delete(&mut args, &command).await,
+            ("space", "config") => self.space_config(&mut args, &command).await,
+            ("space", "jobs") => self.space_jobs(&mut args, &command).await,
+            ("space", "ttl") => self.space_ttl(&mut args, &command).await,
+            ("space", "audit") => self.space_audit(&mut args, &command).await,
+            ("space", "rate") => self.space_rate(&mut args, &command).await,
+            ("space", "link") => self.space_link(&mut args, &command).await,
+            ("space", "dump") => self.space_dump(&mut args, &command).await,
+            ("space", "restore") => self.space_restore(&mut args, &command).await,
             ("records", "insert") => self.records_insert(&mut args, &command).await,
+            ("records", "set") => self.records_set(&mut args, &command).await,
+            ("records", "patch") => self.records_patch(&mut args, &command).await,
             ("records", "list") => self.records_list(&mut args, &command).await,
             ("records", "get") => self.records_get(&mut args, &command).await,
+            ("records", "query") => self.records_query(&mut args, &command).await,
+            ("records", "filter") => self.records_filter(&mut args, &command).await,
+            ("records", "search") => self.records_search(&mut args, &command).await,
+            ("records", "aggregate") => self.records_aggregate(&mut args, &command).await,
+            ("records", "bulk") => self.records_bulk(&mut args, &command).await,
+            ("records", "call") => self.records_call(&mut args, &command).await,
             ("records", "delete") => self.records_delete(&mut args, &command).await,
             ("records", "count") => self.records_count(&mut args, &command).await,
             ("keys", "issue") => self.keys_issue(&mut args, &command).await,
             ("keys", "revoke") => self.keys_revoke(&mut args, &command).await,
             ("keys", "list") => self.keys_list(&mut args, &command).await,
             ("hooks", "register") => self.hooks_register(&mut args, &command).await,
+            ("hooks", "list") => self.hooks_list(&mut args, &command).await,
+            ("hooks", "remove") => self.hooks_remove(&mut args, &command).await,
+            ("hooks", "deliveries") => self.hooks_deliveries(&mut args, &command).await,
+            ("hooks", "replay") => self.hooks_replay(&mut args, &command).await,
             _ => self.err(
                 "unknown command",
                 &command,
@@ -660,8 +809,20 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Writer)?;
+        if let Some(filter_raw) = args.val_after("--filter") {
+            let filter_value: Value = serde_json::from_str(&filter_raw)
+                .map_err(|e| err_json(&format!("filter is not valid JSON: {e}"), command, RECORDS_USAGE, ""))?;
+            let parsed = crate::dsl::parse_filter(&filter_value)
+                .map_err(|e| err_json(&format!("bad filter: {e}"), command, RECORDS_USAGE, ""))?;
+            let deleted = self
+                .store
+                .record_delete_filter(&id, &parsed.conds)
+                .await
+                .map_err(|e| err_json(&format!("delete failed: {e}"), command, RECORDS_USAGE, ""))?;
+            return Ok(json!({ "ok": true, "deleted": deleted, "filter": true }));
+        }
         let Some(seq) = args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()) else {
-            return self.err("missing --seq N", command, RECORDS_USAGE, "e.g. --seq 3");
+            return self.err("need --seq N or --filter '<json>'", command, RECORDS_USAGE, "e.g. --seq 3 or --filter '[{\"field\":\"a\",\"op\":\"eq\",\"value\":1}]'");
         };
         let deleted = self
             .store
@@ -738,5 +899,467 @@ impl<'a> Cli<'a> {
             .await
             .map_err(|e| err_json(&format!("hook failed: {e}"), command, HOOKS_USAGE, ""))?;
         Ok(json!({ "ok": true, "url": url }))
+    }
+
+    // ---- records: set / patch / query / filter / search / aggregate ----
+
+    async fn records_set(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, RECORDS_USAGE)?;
+        self.board(&id, command, RECORDS_USAGE).await?;
+        self.guard(KeyRole::Writer)?;
+        let Some(seq) = args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()) else {
+            return self.err("missing --seq N", command, RECORDS_USAGE, "e.g. --seq 3");
+        };
+        let Some(payload_raw) = args.positional() else {
+            return self.err("missing '<json>' payload", command, RECORDS_USAGE, "single-quoted JSON, e.g. '{\"a\":1}'");
+        };
+        let payload: Value = serde_json::from_str(&payload_raw)
+            .map_err(|e| err_json(&format!("payload is not valid JSON: {e}"), command, RECORDS_USAGE, ""))?;
+        self.store
+            .record_set(NO_TENANT, &id, seq, &payload, None)
+            .await
+            .map_err(|e| err_json(&format!("set failed: {e}"), command, RECORDS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "seq": seq }))
+    }
+
+    async fn records_patch(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, RECORDS_USAGE)?;
+        self.board(&id, command, RECORDS_USAGE).await?;
+        self.guard(KeyRole::Writer)?;
+        let Some(seq) = args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()) else {
+            return self.err("missing --seq N", command, RECORDS_USAGE, "e.g. --seq 3");
+        };
+        let Some(patch_raw) = args.positional() else {
+            return self.err("missing '<patch>' json", command, RECORDS_USAGE, "e.g. '{\"$set\":{\"name\":\"b\"},\"$inc\":{\"n\":1}}'");
+        };
+        let patch: Value = serde_json::from_str(&patch_raw)
+            .map_err(|e| err_json(&format!("patch is not valid JSON: {e}"), command, RECORDS_USAGE, ""))?;
+        let updated = self
+            .store
+            .record_patch(&id, seq, &patch, None)
+            .await
+            .map_err(|e| err_json(&format!("patch failed: {e}"), command, RECORDS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "seq": seq, "payload": updated }))
+    }
+
+    async fn records_query(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, RECORDS_USAGE)?;
+        self.board(&id, command, RECORDS_USAGE).await?;
+        self.guard(KeyRole::Reader)?;
+        let Some(path) = args.val_after("--path").filter(|p| !p.is_empty()) else {
+            return self.err("missing --path a.b", command, RECORDS_USAGE, "a JSON path, e.g. --path profile.name");
+        };
+        let eq = args.val_after("--eq").and_then(|v| serde_json::from_str(&v).ok());
+        let limit = args.val_after("--limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(25).clamp(1, 500);
+        let offset = args.val_after("--offset").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let items = self
+            .store
+            .record_query(&id, &path, eq.as_ref(), limit, offset)
+            .await
+            .map_err(|e| err_json(&format!("query failed: {e}"), command, RECORDS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "path": path, "items": items }))
+    }
+
+    async fn records_filter(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, RECORDS_USAGE)?;
+        self.board(&id, command, RECORDS_USAGE).await?;
+        self.guard(KeyRole::Reader)?;
+        let Some(filter_raw) = args.val_after("--filter") else {
+            return self.err("missing --filter '<json>'", command, RECORDS_USAGE, "[{\"field\":\"a.b\",\"op\":\"gt\",\"value\":100}]");
+        };
+        let filter_value: Value = serde_json::from_str(&filter_raw)
+            .map_err(|e| err_json(&format!("filter is not valid JSON: {e}"), command, RECORDS_USAGE, ""))?;
+        let parsed = crate::dsl::parse_filter(&filter_value)
+            .map_err(|e| err_json(&format!("bad filter: {e}"), command, RECORDS_USAGE, ""))?;
+        let desc = !args.has("--asc");
+        let orders = args.val_after("--order").filter(|o| !o.is_empty()).map(|o| vec![(o, desc)]).unwrap_or_default();
+        let limit = args.val_after("--limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(25).clamp(1, 500);
+        let offset = args.val_after("--offset").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let items = self
+            .store
+            .record_filter(&id, &parsed.conds, &orders, limit, offset)
+            .await
+            .map_err(|e| err_json(&format!("filter failed: {e}"), command, RECORDS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "items": items }))
+    }
+
+    async fn records_search(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, RECORDS_USAGE)?;
+        self.board(&id, command, RECORDS_USAGE).await?;
+        self.guard(KeyRole::Reader)?;
+        let Some(q) = args.val_after("--q").filter(|q| !q.is_empty()) else {
+            return self.err("missing --q <text>", command, RECORDS_USAGE, "the text to search for");
+        };
+        let limit = args.val_after("--limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(25).clamp(1, 500);
+        let offset = args.val_after("--offset").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let items = self
+            .store
+            .record_search(&id, &q, args.has("--hl"), limit, offset)
+            .await
+            .map_err(|e| err_json(&format!("search failed: {e}"), command, RECORDS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "q": q, "items": items }))
+    }
+
+    async fn records_aggregate(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, RECORDS_USAGE)?;
+        self.board(&id, command, RECORDS_USAGE).await?;
+        self.guard(KeyRole::Reader)?;
+        let Some(op) = args.val_after("--op").as_deref().and_then(crate::dsl::Agg::parse) else {
+            return self.err("missing or invalid --op", command, RECORDS_USAGE, "count|sum|avg|min|max");
+        };
+        let field = args.val_after("--field").unwrap_or_default();
+        let group_by = args.val_after("--group-by").filter(|g| !g.is_empty());
+        let conds = match args.val_after("--filter") {
+            Some(raw) => {
+                let value: Value = serde_json::from_str(&raw)
+                    .map_err(|e| err_json(&format!("filter is not valid JSON: {e}"), command, RECORDS_USAGE, ""))?;
+                crate::dsl::parse_filter(&value)
+                    .map_err(|e| err_json(&format!("bad filter: {e}"), command, RECORDS_USAGE, ""))?
+                    .conds
+            }
+            None => Vec::new(),
+        };
+        let result = self
+            .store
+            .record_aggregate(&id, op, &field, group_by.as_deref(), &conds)
+            .await
+            .map_err(|e| err_json(&format!("aggregate failed: {e}"), command, RECORDS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "result": result }))
+    }
+
+    async fn records_bulk(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, RECORDS_USAGE)?;
+        self.board(&id, command, RECORDS_USAGE).await?;
+        self.guard(KeyRole::Writer)?;
+        let mut payloads = Vec::new();
+        while let Some(raw) = args.positional() {
+            let payload: Value = serde_json::from_str(&raw)
+                .map_err(|e| err_json(&format!("'{raw}' is not valid JSON: {e}"), command, RECORDS_USAGE, ""))?;
+            payloads.push(payload);
+        }
+        if payloads.is_empty() {
+            return self.err("missing '<json>' payloads", command, RECORDS_USAGE, "one or more single-quoted JSON objects");
+        }
+        let writer = writer_of(&Some(borrow_auth(&self.auth)));
+        let seqs = self
+            .store
+            .record_bulk_insert(&id, payloads, writer.as_deref())
+            .await
+            .map_err(|e| err_json(&format!("bulk failed: {e}"), command, RECORDS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "seqs": seqs, "count": seqs.len() }))
+    }
+
+    async fn records_call(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, RECORDS_USAGE)?;
+        self.board(&id, command, RECORDS_USAGE).await?;
+        self.guard(KeyRole::Writer)?;
+        let Some(url) = args.positional().filter(|u| crate::netguard::valid_url(u)) else {
+            return self.err("missing or unsafe <url>", command, RECORDS_USAGE, "public http(s) URL only (SSRF-guarded)");
+        };
+        let method = args.val_after("--method").unwrap_or_else(|| "POST".to_string()).to_uppercase();
+        let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
+            return self.err("invalid --method", command, RECORDS_USAGE, "GET|POST|PUT|PATCH|DELETE");
+        };
+        let timeout_ms = args.val_after("--timeout-ms").and_then(|v| v.parse::<u64>().ok()).unwrap_or(10_000).clamp(500, 60_000);
+        let mut builder = reqwest::Client::new()
+            .request(method, &url)
+            .timeout(std::time::Duration::from_millis(timeout_ms));
+        if let Some(body) = args.val_after("--body") {
+            if let Ok(value) = serde_json::from_str::<Value>(&body) {
+                builder = builder.body(value.to_string());
+            } else {
+                builder = builder.body(body);
+            }
+        }
+        match builder.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                Ok(json!({ "ok": true, "url": url, "status": status, "body": text }))
+            }
+            Err(e) => self.err(&format!("call failed: {e}"), command, RECORDS_USAGE, ""),
+        }
+    }
+
+    // ---- space: config / jobs / ttl / audit / rate / link / dump / restore
+
+    async fn space_config(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        let config = self
+            .store
+            .board_config(&id)
+            .await
+            .map_err(|e| err_json(&format!("config failed: {e}"), command, SPACE_USAGE, ""))?;
+        Ok(json!({ "ok": true, "config": config }))
+    }
+
+    async fn space_jobs(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        match args.positional().as_deref() {
+            Some("add") => {
+                let (Some(name), Some(schedule), Some(action_raw)) = (
+                    args.val_after("--name").filter(|n| !n.is_empty()),
+                    args.val_after("--schedule").filter(|s| !s.is_empty()),
+                    args.val_after("--action"),
+                ) else {
+                    return self.err("need --name, --schedule and --action", command, SPACE_USAGE, "e.g. --action '{\"type\":\"http\",\"url\":\"https://...\"}'");
+                };
+                let action: Value = serde_json::from_str(&action_raw)
+                    .map_err(|e| err_json(&format!("action is not valid JSON: {e}"), command, SPACE_USAGE, ""))?;
+                let job_id = self
+                    .store
+                    .job_add(&id, &name, &schedule, &action)
+                    .await
+                    .map_err(|e| err_json(&format!("job add failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "id": job_id }))
+            }
+            Some("list") => {
+                let jobs = self
+                    .store
+                    .job_list(&id)
+                    .await
+                    .map_err(|e| err_json(&format!("jobs failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "jobs": jobs }))
+            }
+            Some("remove") => {
+                let Some(job_id) = args.val_after("--id").and_then(|v| v.parse::<i64>().ok()) else {
+                    return self.err("missing --id N", command, SPACE_USAGE, "run `cli space jobs list` to see ids");
+                };
+                let removed = self
+                    .store
+                    .job_remove(&id, job_id)
+                    .await
+                    .map_err(|e| err_json(&format!("job remove failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "removed": removed }))
+            }
+            _ => self.err("jobs needs add|list|remove", command, SPACE_USAGE, "cli space jobs add|list|remove"),
+        }
+    }
+
+    async fn space_ttl(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        match args.positional().as_deref() {
+            Some("set") => {
+                let (Some(seconds), Some(field)) = (
+                    args.val_after("--seconds").and_then(|v| v.parse::<i64>().ok()),
+                    args.val_after("--field").filter(|f| !f.is_empty()),
+                ) else {
+                    return self.err("need --seconds N and --field <path>", command, SPACE_USAGE, "e.g. --seconds 3600 --field expires_at");
+                };
+                if seconds <= 0 {
+                    return self.err("--seconds must be positive", command, SPACE_USAGE, "");
+                }
+                self.store
+                    .ttl_set(&id, seconds, &field)
+                    .await
+                    .map_err(|e| err_json(&format!("ttl failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "seconds": seconds, "field": field }))
+            }
+            Some("clear") => {
+                self.store
+                    .ttl_clear(&id)
+                    .await
+                    .map_err(|e| err_json(&format!("ttl failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "ttl": "disabled" }))
+            }
+            _ => self.err("ttl needs set|clear", command, SPACE_USAGE, "cli space ttl set|clear"),
+        }
+    }
+
+    async fn space_audit(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        match args.positional().as_deref() {
+            Some(sub) if sub == "on" || sub == "off" => {
+                let enabled = sub == "on";
+                self.store
+                    .audit_enable(&id, enabled)
+                    .await
+                    .map_err(|e| err_json(&format!("audit failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "enabled": enabled }))
+            }
+            Some("list") => {
+                let limit = args.val_after("--limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(50).clamp(1, 1000);
+                let items = self
+                    .store
+                    .audit_list(&id, limit)
+                    .await
+                    .map_err(|e| err_json(&format!("audit failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "items": items }))
+            }
+            _ => self.err("audit needs on|off|list", command, SPACE_USAGE, "cli space audit on|off|list"),
+        }
+    }
+
+    async fn space_rate(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        match args.positional().as_deref() {
+            Some("set") => {
+                let Some(per_minute) = args.val_after("--per-minute").and_then(|v| v.parse::<i64>().ok()) else {
+                    return self.err("missing --per-minute N", command, SPACE_USAGE, "requests allowed per minute");
+                };
+                if per_minute <= 0 {
+                    return self.err("--per-minute must be positive", command, SPACE_USAGE, "");
+                }
+                self.store
+                    .rate_set(&id, per_minute)
+                    .await
+                    .map_err(|e| err_json(&format!("rate failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "per_minute": per_minute }))
+            }
+            Some("clear") => {
+                self.store
+                    .rate_set(&id, 0)
+                    .await
+                    .map_err(|e| err_json(&format!("rate failed: {e}"), command, SPACE_USAGE, ""))?;
+                self.store.rate_reset(&id).await;
+                Ok(json!({ "ok": true, "per_minute": 0 }))
+            }
+            _ => self.err("rate needs set|clear", command, SPACE_USAGE, "cli space rate set --per-minute N|clear"),
+        }
+    }
+
+    async fn space_link(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        match args.positional().as_deref() {
+            Some("set") => {
+                self.guard(KeyRole::Writer)?;
+                let (Some(seq), Some(parent), Some(via)) = (
+                    args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()),
+                    args.val_after("--parent").and_then(|v| v.parse::<i64>().ok()),
+                    args.val_after("--via").filter(|v| !v.is_empty()),
+                ) else {
+                    return self.err("need --seq N --parent M --via x", command, SPACE_USAGE, "");
+                };
+                self.store
+                    .link_set(&id, seq, parent, &via)
+                    .await
+                    .map_err(|e| err_json(&format!("link failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "seq": seq, "parent": parent, "via": via }))
+            }
+            Some("clear") => {
+                self.guard(KeyRole::Writer)?;
+                let (Some(seq), Some(via)) = (
+                    args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()),
+                    args.val_after("--via").filter(|v| !v.is_empty()),
+                ) else {
+                    return self.err("need --seq N --via x", command, SPACE_USAGE, "");
+                };
+                let cleared = self
+                    .store
+                    .link_clear(&id, seq, &via)
+                    .await
+                    .map_err(|e| err_json(&format!("link failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "cleared": cleared }))
+            }
+            Some("show") => {
+                self.guard(KeyRole::Reader)?;
+                let Some(seq) = args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()) else {
+                    return self.err("missing --seq N", command, SPACE_USAGE, "");
+                };
+                let links = self
+                    .store
+                    .link_get(&id, seq)
+                    .await
+                    .map_err(|e| err_json(&format!("links failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "seq": seq, "links": links }))
+            }
+            _ => self.err("link needs set|clear|show", command, SPACE_USAGE, "cli space link set|clear|show"),
+        }
+    }
+
+    async fn space_dump(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        let dump = self
+            .store
+            .record_dump(&id)
+            .await
+            .map_err(|e| err_json(&format!("dump failed: {e}"), command, SPACE_USAGE, ""))?;
+        Ok(json!({ "ok": true, "dump": dump }))
+    }
+
+    async fn space_restore(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        let Some(dump_raw) = args.val_after("--dump") else {
+            return self.err("missing --dump '<json>'", command, SPACE_USAGE, "paste the output of `cli space dump`");
+        };
+        let dump: Value = serde_json::from_str(&dump_raw)
+            .map_err(|e| err_json(&format!("dump is not valid JSON: {e}"), command, SPACE_USAGE, ""))?;
+        let counts = self
+            .store
+            .record_restore(&id, &dump)
+            .await
+            .map_err(|e| err_json(&format!("restore failed: {e}"), command, SPACE_USAGE, ""))?;
+        Ok(json!({ "ok": true, "counts": counts }))
+    }
+
+    // ---- hooks: list / remove / deliveries / replay
+
+    async fn hooks_list(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, HOOKS_USAGE)?;
+        self.board(&id, command, HOOKS_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        let hooks = self
+            .store
+            .hook_list(NO_TENANT, &id)
+            .await
+            .map_err(|e| err_json(&format!("list failed: {e}"), command, HOOKS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "hooks": hooks }))
+    }
+
+    async fn hooks_remove(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, HOOKS_USAGE)?;
+        self.board(&id, command, HOOKS_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        let Some(url) = args.val_after("--url").filter(|u| u.starts_with("http")) else {
+            return self.err("missing --url <url>", command, HOOKS_USAGE, "run `cli hooks list` to see urls");
+        };
+        let removed = self
+            .store
+            .hook_remove(NO_TENANT, &id, &url)
+            .await
+            .map_err(|e| err_json(&format!("remove failed: {e}"), command, HOOKS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "removed": removed }))
+    }
+
+    async fn hooks_deliveries(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, HOOKS_USAGE)?;
+        self.board(&id, command, HOOKS_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        let status = args.val_after("--status").filter(|s| !s.is_empty());
+        let limit = args.val_after("--limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(50).clamp(1, 500);
+        let items = self
+            .store
+            .delivery_list(&id, status.as_deref(), limit)
+            .await
+            .map_err(|e| err_json(&format!("deliveries failed: {e}"), command, HOOKS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "items": items }))
+    }
+
+    async fn hooks_replay(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, HOOKS_USAGE)?;
+        self.board(&id, command, HOOKS_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        let id_filter = args.val_after("--id").and_then(|v| v.parse::<i64>().ok());
+        let requeued = self
+            .store
+            .delivery_replay(&id, id_filter)
+            .await
+            .map_err(|e| err_json(&format!("replay failed: {e}"), command, HOOKS_USAGE, ""))?;
+        Ok(json!({ "ok": true, "requeued": requeued }))
     }
 }
