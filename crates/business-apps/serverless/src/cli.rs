@@ -187,12 +187,11 @@ and the computed/validate/redact rules. admin+ role.
 
 cli space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']
 cli space config clear --computed|--validate|--redact
-writes the pre-write hardening rules. computed is an array of
-{\"name\":\"total\",\"expr\":\"price * qty\"} entries evaluated in
-alphabetical name order (single-quoted literals: 'prod-'), validate is an
-array of {\"if\":{...},\"then\":{...}} rules that can reject the write
-and redact is an array of {\"match\":{...},\"remove\":[\"a.b\"]}
-entries hiding fields from public reads. clear resets a rule to unset.
+writes the pre-write hardening rules: computed is an object of
+{field: expr} (e.g. {\"total\": \"$.price * $.qty\"}), validate is an array
+of {\"when\": \"<expr>\", \"error\": \"msg\"} rules — the first failing rule
+rejects the write — and redact is an array of JSON paths ([\"$.token\"])
+masked with \"***\" on public reads only. clear resets a rule to unset.
 admin+ role."),
         ("space", "recipes") => Some("\
 cli space recipes list [--space <space_id>]
@@ -1123,9 +1122,10 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, SPACE_USAGE)?;
         self.board(&id, command, SPACE_USAGE).await?;
         self.guard(KeyRole::Admin)?;
-        match args.positional().as_deref() {
+        let sub = args.positional();
+        let clearing = sub.as_deref() == Some("clear");
+        match sub.as_deref() {
             Some("set") | Some("clear") => {
-                let clearing = args.positional().as_deref() == Some("clear");
                 let mut touched: Vec<String> = Vec::new();
                 for (flag, key) in [
                     ("--computed", "computed_json"),
