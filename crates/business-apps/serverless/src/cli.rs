@@ -44,7 +44,7 @@ usage: cli <group> <verb> [args]
 groups:
   space     show / update / deploy / files / media / delete /  the space itself
             jobs / ttl / audit / rate / link / config /
-            dump / restore
+            recipes / secrets / dump / restore
   records   insert / set / patch / list / get / delete /      the space's records
             query / filter / search / aggregate / bulk / call / count
   keys      issue / revoke / list                            scoped API keys
@@ -98,7 +98,11 @@ usage: cli space <verb> [--space <space_id>] [args]
           [--space <id>] upload <path> --content <base64>
           [--space <id>] remove <path>                   (staging only)
   media   [--space <id>] [--icon <b64>] [--banner <b64>] [--gallery <b64>]* [--clear-gallery]
-  config  [--space <id>]                                 board config (ttl/rate/audit flags)
+  config  [--space <id>]                                 board config (incl. hardening rules)
+  config  [--space <id>] set|clear --computed '<json>'    computed/validate/redact rules (admin)
+          [--space <id>] [--validate '<json>'] [--redact '<json>']
+  recipes [--space <id>] list|add|enable|disable|remove   event recipes (admin)
+  secrets [--space <id>] list|set|remove                  encrypted app secrets (admin)
   jobs    [--space <id>] add|list|remove                 cron jobs (admin)
   ttl     [--space <id>] set|clear                       record expiry (admin)
   audit   [--space <id>] on|off|list                     audit trail (admin)
@@ -178,7 +182,37 @@ sets the space's icon, banner and/or gallery photos (base64 PNG/JPEG/WebP).
 gallery photo first. Unsupplied flags keep current values. admin+ role."),
         ("space", "config") => Some("\
 cli space config [--space <space_id>]
-prints the board config: title, public_reads, unique key, ttl, rate, audit.
+prints the board config: title, public_reads, unique key, ttl, rate, audit
+and the computed/validate/redact rules. admin+ role.
+
+cli space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']
+cli space config clear --computed|--validate|--redact
+writes the pre-write hardening rules. computed is an array of
+{\"name\":\"total\",\"expr\":\"price * qty\"} entries evaluated in
+alphabetical name order (single-quoted literals: 'prod-'), validate is an
+array of {\"if\":{...},\"then\":{...}} rules that can reject the write
+and redact is an array of {\"match\":{...},\"remove\":[\"a.b\"]}
+entries hiding fields from public reads. clear resets a rule to unset.
+admin+ role."),
+        ("space", "recipes") => Some("\
+cli space recipes list [--space <space_id>]
+cli space recipes add --name n --when <event> [--match '<json>'] \
+       [--dedup-on <path>] [--disabled] --actions '<json>'
+cli space recipes enable|disable|remove --name n [--space <space_id>]
+event recipes run on board events: --when is an event name pattern such as
+record.created / record.updated / record.deleted / inbound / cron:<job.name>. --match filters
+the payload (JSON matching), --dedup-on dedupes by a payload path (a
+sha-256 fingerprint column in srv_recipe_runs), --actions is the action
+list, e.g. [{\"$secrets\":{\"url\":\"https://api.example.com?k={{secrets.KEY}}\"}}, {\"http\":{\"url\":\"https://...\"}}].
+recipes dispatch after every write and after each cron run; http actions
+are SSRF-guarded (private/loopback refused). admin+ role."),
+        ("space", "secrets") => Some("\
+cli space secrets list [--space <space_id>]
+cli space secrets set --name n --value <secret> [--space <space_id>]
+cli space secrets remove --name n [--space <space_id>]
+encrypted app secrets for recipe actions: values are AES-256-GCM
+encrypted at rest (LAN_SRV_SECRET_KEY) and injected into action templates
+as {{secrets.NAME}}; list shows names + fingerprints only, never values.
 admin+ role."),
         ("space", "jobs") => Some("\
 cli space jobs add --name n --schedule '*/10 * * * *' --action '{\"type\":\"poll\",\"url\":\"https://...\",\"path\":\"$.a.b\"}'
@@ -536,6 +570,8 @@ impl<'a> Cli<'a> {
             ("space", "link") => self.space_link(&mut args, &command).await,
             ("space", "dump") => self.space_dump(&mut args, &command).await,
             ("space", "restore") => self.space_restore(&mut args, &command).await,
+            ("space", "recipes") => self.space_recipes(&mut args, &command).await,
+            ("space", "secrets") => self.space_secrets(&mut args, &command).await,
             ("records", "insert") => self.records_insert(&mut args, &command).await,
             ("records", "set") => self.records_set(&mut args, &command).await,
             ("records", "patch") => self.records_patch(&mut args, &command).await,
@@ -1087,12 +1123,182 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, SPACE_USAGE)?;
         self.board(&id, command, SPACE_USAGE).await?;
         self.guard(KeyRole::Admin)?;
-        let config = self
-            .store
-            .board_config(&id)
-            .await
-            .map_err(|e| err_json(&format!("config failed: {e}"), command, SPACE_USAGE, ""))?;
-        Ok(json!({ "ok": true, "config": config }))
+        match args.positional().as_deref() {
+            Some("set") | Some("clear") => {
+                let clearing = args.positional().as_deref() == Some("clear");
+                let mut touched: Vec<String> = Vec::new();
+                for (flag, key) in [
+                    ("--computed", "computed_json"),
+                    ("--validate", "validate_json"),
+                    ("--redact", "redact_json"),
+                ] {
+                    let value: Option<Result<Option<Value>, Value>> = if clearing {
+                        if args.has(flag) { Some(Ok(None)) } else { None }
+                    } else {
+                        args.val_after(flag).map(|v| {
+                            if v == "null" {
+                                Ok(None)
+                            } else {
+                                serde_json::from_str::<Value>(&v)
+                                    .map(Some)
+                                    .map_err(|e| err_json(&format!("{flag} is not valid JSON: {e}"), command, SPACE_USAGE, ""))
+                            }
+                        })
+                    };
+                    let Some(v) = value else { continue };
+                    let v = v?;
+                    self.store
+                        .board_config_set(&id, key, v.as_ref())
+                        .await
+                        .map_err(|e| err_json(&format!("config failed: {e}"), command, SPACE_USAGE, ""))?;
+                    touched.push(flag.trim_start_matches("--").to_string());
+                }
+                if touched.is_empty() {
+                    return self.err(
+                        if clearing { "need at least one of --computed/--validate/--redact" } else { "need --computed/--validate/--redact '<json>' (or 'null' to clear)" },
+                        command,
+                        SPACE_USAGE,
+                        "cli space config set --computed '[{\"name\":\"total\",\"expr\":\"price * qty\"}]'",
+                    );
+                }
+                Ok(json!({ "ok": true, "action": if clearing { "clear" } else { "set" }, "keys": touched }))
+            }
+            _ => {
+                let config = self
+                    .store
+                    .board_config(&id)
+                    .await
+                    .map_err(|e| err_json(&format!("config failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "config": config }))
+            }
+        }
+    }
+
+    async fn space_recipes(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        match args.positional().as_deref() {
+            Some("list") => {
+                let recipes = self
+                    .store
+                    .recipe_list(&id)
+                    .await
+                    .map_err(|e| err_json(&format!("recipes failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "recipes": recipes }))
+            }
+            Some("add") => {
+                let (Some(name), Some(when)) = (
+                    args.val_after("--name").filter(|n| !n.is_empty()),
+                    args.val_after("--when").filter(|w| !w.is_empty()),
+                ) else {
+                    return self.err("need --name and --when", command, SPACE_USAGE, "e.g. --when record.created or --when cron:ping");
+                };
+                let match_json = match args.val_after("--match") {
+                    Some(m) => Some(
+                        serde_json::from_str::<Value>(&m)
+                            .map_err(|e| err_json(&format!("--match is not valid JSON: {e}"), command, SPACE_USAGE, ""))?,
+                    ),
+                    None => None,
+                };
+                let actions = args
+                    .val_after("--actions")
+                    .map(|a| {
+                        serde_json::from_str::<Value>(&a)
+                            .map_err(|e| err_json(&format!("--actions is not valid JSON: {e}"), command, SPACE_USAGE, ""))
+                    })
+                    .transpose()?
+                    .unwrap_or_else(|| Value::Array(Vec::new()));
+                let enabled = !args.has("--disabled");
+                let id_row = self
+                    .store
+                    .recipe_add(
+                        &id,
+                        &name,
+                        &when,
+                        match_json.as_ref().map(Value::to_string).as_deref(),
+                        enabled,
+                        args.val_after("--dedup-on").as_deref(),
+                        &actions.to_string(),
+                    )
+                    .await
+                    .map_err(|e| err_json(&format!("recipe add failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "id": id_row, "name": name }))
+            }
+            Some(verb @ ("enable" | "disable")) => {
+                let Some(name) = args.val_after("--name").filter(|n| !n.is_empty()) else {
+                    return self.err("need --name", command, SPACE_USAGE, "cli space recipes enable --name n");
+                };
+                let found = self
+                    .store
+                    .recipe_set_enabled(&id, &name, verb == "enable")
+                    .await
+                    .map_err(|e| err_json(&format!("recipe failed: {e}"), command, SPACE_USAGE, ""))?;
+                if !found {
+                    return self.err("recipe not found", command, SPACE_USAGE, "cli space recipes list");
+                }
+                Ok(json!({ "ok": true, "name": name, "enabled": verb == "enable" }))
+            }
+            Some("remove") => {
+                let Some(name) = args.val_after("--name").filter(|n| !n.is_empty()) else {
+                    return self.err("need --name", command, SPACE_USAGE, "cli space recipes remove --name n");
+                };
+                let found = self
+                    .store
+                    .recipe_remove(&id, &name)
+                    .await
+                    .map_err(|e| err_json(&format!("recipe failed: {e}"), command, SPACE_USAGE, ""))?;
+                if !found {
+                    return self.err("recipe not found", command, SPACE_USAGE, "cli space recipes list");
+                }
+                Ok(json!({ "ok": true, "name": name }))
+            }
+            _ => self.err("recipes needs list|add|enable|disable|remove", command, SPACE_USAGE, "cli space recipes list"),
+        }
+    }
+
+    async fn space_secrets(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
+        let id = self.space_arg(args, command, SPACE_USAGE)?;
+        self.board(&id, command, SPACE_USAGE).await?;
+        self.guard(KeyRole::Admin)?;
+        match args.positional().as_deref() {
+            Some("list") => {
+                let secrets = self
+                    .store
+                    .secret_list(&id)
+                    .await
+                    .map_err(|e| err_json(&format!("secrets failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "secrets": secrets }))
+            }
+            Some("set") => {
+                let (Some(name), Some(value)) = (
+                    args.val_after("--name").filter(|n| !n.is_empty()),
+                    args.val_after("--value").or_else(|| args.next().map(str::to_owned)).filter(|v| !v.is_empty()),
+                ) else {
+                    return self.err("need --name and --value", command, SPACE_USAGE, "cli space secrets set --name KEY --value <secret>");
+                };
+                self.store
+                    .secret_set(&id, &name, &value)
+                    .await
+                    .map_err(|e| err_json(&format!("secret failed: {e}"), command, SPACE_USAGE, ""))?;
+                Ok(json!({ "ok": true, "name": name }))
+            }
+            Some("remove") => {
+                let Some(name) = args.val_after("--name").filter(|n| !n.is_empty()) else {
+                    return self.err("need --name", command, SPACE_USAGE, "cli space secrets remove --name KEY");
+                };
+                let found = self
+                    .store
+                    .secret_remove(&id, &name)
+                    .await
+                    .map_err(|e| err_json(&format!("secret failed: {e}"), command, SPACE_USAGE, ""))?;
+                if !found {
+                    return self.err("secret not found", command, SPACE_USAGE, "cli space secrets list");
+                }
+                Ok(json!({ "ok": true, "name": name }))
+            }
+            _ => self.err("secrets needs list|set|remove", command, SPACE_USAGE, "cli space secrets list"),
+        }
     }
 
     async fn space_jobs(&self, args: &mut Args<'_>, command: &str) -> CmdResult {

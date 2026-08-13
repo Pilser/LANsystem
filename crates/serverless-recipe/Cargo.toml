@@ -1,0 +1,21 @@
+[package]
+name = "serverless-recipe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Declarative recipe engine for serverless boards (ported from zerowrapper's zw-recipe): when/match/actions recipes, event contexts, secrets substitution. DB-free — drives a store through the RecipeDb trait."
+
+[dependencies]
+serverless-expr = { path = "../serverless-expr" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

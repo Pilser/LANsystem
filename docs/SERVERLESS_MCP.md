@@ -290,7 +290,40 @@ HTTP error in `last_message`, and `replay` re-queued it immediately.
   add/list/remove, delivery queue + replay, and the config panel (ttl,
   audit, rate, dump download, restore) — all server-rendered, no JS needed.
 
-### 6.7 Milestones — all landed
+### 6.7 Hardening (computed/validate/redact, recipes, secrets) — implemented
+
+Write-rule + recipe + secret surface, all admin+ except `/events` (writer+):
+
+- `space config` now also prints the computed/validate/redact rules; new verbs:
+  - `space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']`
+    — `computed` is an object `{"total": "$.price * $.qty"}` evaluated on every
+    write (later fields may reference earlier, alphabetical order);
+    `validate` is `[{"when": "<expr>", "error": "msg"}]` — first failing rule
+    aborts the write with its message; `redact` is `["$.ssn"]` — paths masked
+    with `"***"` on **public reads** only (stored payload untouched)
+  - `space config clear --computed|--validate|--redact` — unset a rule
+  - `space recipes list|add|enable|disable|remove` — `add` takes `--name`,
+    `--when record.created|record.updated|record.deleted|inbound|cron:<job.name>`,
+    optional `--match '<json>'` / `--dedup-on <path>` / `--disabled`, and
+    `--actions '[{"http":{"url":"..."}}]'` (dedup fingerprints sha-256 of the
+    payload path into `srv_recipe_runs`)
+  - `space secrets list|set --name N --value v|remove --name N` — AES-256-GCM
+    encrypted at rest (`LAN_SRV_SECRET_KEY`; dev fallback key + warn),
+    injected into http action templates as `{{secrets.NAME}}`; list shows
+    names + fingerprints only
+- Recipes dispatch after every insert/set/delete and after each cron job run
+  (`cron:<job.name>`, payload = polled record or null for http jobs) and on
+  `POST /api/srv/{board_id}/events` (body = raw JSON or `{"payload": {...}}`).
+  http actions are SSRF-guarded (loopback/private refused), timeout 0.5–60 s,
+  2 MB cap.
+- REST for app JS: `PUT /api/srv/{board_id}/config` (computed/validate/redact,
+  null clears), `GET|POST /recipes`, `PUT /recipes/{name}/enabled`,
+  `DELETE /recipes/{name}`, `GET /secrets`, `PUT|DELETE /secrets/{name}`,
+  `POST /events`.
+- Console (`/sl/{board}`): "Write rules", "Recipes" and "Secrets" panels with
+  set/add/enable/remove forms (server-rendered).
+
+### 6.8 Milestones — all landed
 
 1. **M1 — records ops** (6.1) — done (search uses LIKE, not FTS5; `--hl`
    wraps matches in `<mark>`).

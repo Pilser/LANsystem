@@ -65,6 +65,8 @@ pub async fn hook_worker(store: TursoStore) {
 
 /// Run due cron jobs: recompute `next_run_at` *before* executing, then fire
 /// the action (http post or poll-and-store), recording last status/message.
+/// After the job fires, `cron:<job.name>` recipes are dispatched with the
+/// stored record (or the polled record when the action stored one).
 pub async fn scheduler_worker(store: TursoStore) {
     let client = reqwest::Client::builder().build().expect("reqwest client");
     loop {
@@ -79,10 +81,20 @@ pub async fn scheduler_worker(store: TursoStore) {
                     tracing::warn!("serverless job {} reschedule: {e}", job.id);
                     continue;
                 }
-                let (status, message) = run_job(&client, &store, &board_id, &job).await;
+                let (status, message, event_payload) = run_job(&client, &store, &board_id, &job).await;
                 if let Err(e) = store.job_mark(&board_id, job.id, status, &message).await {
                     tracing::warn!("serverless job {} mark: {e}", job.id);
                 }
+                store
+                    .dispatch_recipes(
+                        &board_id,
+                        serverless_recipe::EventKind::Cron,
+                        None,
+                        &event_payload.unwrap_or_else(|| serde_json::Value::Null),
+                        None,
+                        Some(&job.name),
+                    )
+                    .await;
             }
         }
         tokio::time::sleep(Duration::from_secs(15)).await;
@@ -94,18 +106,18 @@ async fn run_job(
     store: &TursoStore,
     board_id: &str,
     job: &crate::store::JobRow,
-) -> (&'static str, String) {
+) -> (&'static str, String, Option<serde_json::Value>) {
     let Some(action) = job.action.as_object() else {
-        return ("failed", "action is not a JSON object".to_string());
+        return ("failed", "action is not a JSON object".to_string(), None);
     };
     let Some(kind) = action.get("type").and_then(serde_json::Value::as_str) else {
-        return ("failed", "action missing `type`".to_string());
+        return ("failed", "action missing `type`".to_string(), None);
     };
     let Some(url) = action.get("url").and_then(serde_json::Value::as_str) else {
-        return ("failed", "action missing `url`".to_string());
+        return ("failed", "action missing `url`".to_string(), None);
     };
     if !crate::netguard::valid_url(url) {
-        return ("failed", "url rejected by netguard (private/loopback)".to_string());
+        return ("failed", "url rejected by netguard (private/loopback)".to_string(), None);
     }
     let method = action.get("method").and_then(serde_json::Value::as_str).unwrap_or("POST").to_uppercase();
     let timeout_ms = action.get("timeout_ms").and_then(serde_json::Value::as_u64).unwrap_or(10_000).clamp(500, 60_000);
@@ -122,28 +134,28 @@ async fn run_job(
     }
     let resp = match req.timeout(Duration::from_millis(timeout_ms)).send().await {
         Ok(r) => r,
-        Err(e) => return ("failed", format!("request: {e}")),
+        Err(e) => return ("failed", format!("request: {e}"), None),
     };
     let body = match resp.bytes().await {
         Ok(b) => b,
-        Err(e) => return ("failed", format!("read body: {e}")),
+        Err(e) => return ("failed", format!("read body: {e}"), None),
     };
     if kind == "http" {
-        return ("ok", format!("{} bytes", body.len()));
+        return ("ok", format!("{} bytes", body.len()), None);
     }
     // kind == "poll": extract a JSON path from the response and store it.
     if body.len() > 2 * 1024 * 1024 {
-        return ("failed", "response exceeds 2MB".to_string());
+        return ("failed", "response exceeds 2MB".to_string(), None);
     }
     let Ok(text) = String::from_utf8(body.to_vec()) else {
-        return ("failed", "response is not utf-8".to_string());
+        return ("failed", "response is not utf-8".to_string(), None);
     };
     let Ok(response_json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return ("failed", "response is not JSON".to_string());
+        return ("failed", "response is not JSON".to_string(), None);
     };
     let path = action.get("path").and_then(serde_json::Value::as_str).unwrap_or("$");
     let Some(value) = dsl::json_path(&response_json, path) else {
-        return ("failed", format!("path `{path}` not found"));
+        return ("failed", format!("path `{path}` not found"), None);
     };
     let record = serde_json::json!({
         "job_id": job.id,
@@ -152,8 +164,8 @@ async fn run_job(
         "polled_at": now_ms(),
     });
     match store.record_insert(crate::store::NO_TENANT, board_id, &record, Some("cron"), false).await {
-        Ok(seq) => ("ok", format!("stored seq {seq}")),
-        Err(e) => ("failed", e.to_string()),
+        Ok(seq) => ("ok", format!("stored seq {seq}"), Some(record)),
+        Err(e) => ("failed", e.to_string(), None),
     }
 }
 

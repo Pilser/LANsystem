@@ -143,6 +143,14 @@ outbound calls, cron jobs, webhook retry queue, config/export, console
 panels) is **implemented** — see `SERVERLESS_MCP.md` §6 for the full
 feature/status table and the E2E verification notes.
 
+Hardening (write rules computed/validate/redact, event recipes with an
+SSRF-guarded engine, AES-256-GCM encrypted secrets, expression DSL) is also
+**implemented** — same doc §6.7, plus `docs/SERVERLESS_HARDENING.md` for the
+port plan, schema and session log. CLI verbs: `space config set|clear`,
+`space recipes …`, `space secrets …`; REST: `PUT /config`,
+`/recipes{/…}`, `/secrets{/…}`, `POST /events`; console panels on
+`/sl/{board}` (Write rules / Recipes / Secrets).
+
 ## 9. Implementation order
 
 1. `crates/db/src/schema.rs` — new props (`BOARD_DESCRIPTION`, `BOARD_ICON_KEY`,

@@ -25,6 +25,9 @@ pub enum ServerlessError {
 
     #[error("database error: {0}")]
     Db(String),
+
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl From<std::io::Error> for ServerlessError {
