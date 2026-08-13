@@ -271,7 +271,7 @@ HTTP error in `last_message`, and `replay` re-queued it immediately.
 
 - `space show` returns the full config (title, public_reads, unique key,
   record count, deployed_at) — plus new verbs:
-  - `space config` — prints ttl/rate/audit/unique-key settings (admin+)
+  - `space config` — prints ttl/rate/audit/unique-key settings (reader+)
   - `space ttl set --seconds N --field <path>` / `space ttl clear` —
     records whose `payload[field]` (unix seconds) is past
     `now + N` are **hidden from all reads** (list/get/search/filter/
@@ -292,7 +292,8 @@ HTTP error in `last_message`, and `replay` re-queued it immediately.
 
 ### 6.7 Hardening (computed/validate/redact, recipes, secrets) — implemented
 
-Write-rule + recipe + secret surface, all admin+ except `/events` (writer+):
+Write-rule + recipe + secret surface, no role ceiling (any valid space key;
+only `/events` needs writer+):
 
 - `space config` now also prints the computed/validate/redact rules; new verbs:
   - `space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']`

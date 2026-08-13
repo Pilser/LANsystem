@@ -1375,7 +1375,6 @@ type ConfigSetForm = serde_json::Map<String, Value>;
 async fn api_config_set(Json(req): Json<ConfigSetForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Admin)?;
     let mut touched: Vec<(&str, bool)> = Vec::new();
     for (key, json_key) in [("computed", "computed_json"), ("validate", "validate_json"), ("redact", "redact_json")] {
         let Some(value) = req.get(key) else { continue };
@@ -1432,7 +1431,6 @@ pub(crate) struct SecretBody {
 async fn api_recipe_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Admin)?;
     let store = app_context::<TursoStore>(cx);
     let recipes = store.recipe_list(raw).await.map_err(|e| bad_request(format!("recipes failed: {e}")))?;
     Ok(Json(json!(recipes)))
@@ -1443,7 +1441,6 @@ async fn api_recipe_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
 async fn api_recipe_add(Json(req): Json<RecipeForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Admin)?;
     if req.name.trim().is_empty() || req.when.trim().is_empty() {
         return Err(bad_request("need name and when").into());
     }
@@ -1461,7 +1458,6 @@ async fn api_recipe_enabled(Json(req): Json<EnabledBody>, cx: &Cx) -> Result<Jso
     let raw: &str = path_param::<BoardId>(cx);
     let name: &str = path_param::<Name>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Admin)?;
     let store = app_context::<TursoStore>(cx);
     let found = store.recipe_set_enabled(raw, name, req.enabled).await.map_err(|e| bad_request(format!("recipe failed: {e}")))?;
     if !found {
@@ -1476,7 +1472,6 @@ async fn api_recipe_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let name: &str = path_param::<Name>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Admin)?;
     let store = app_context::<TursoStore>(cx);
     let found = store.recipe_remove(raw, name).await.map_err(|e| bad_request(format!("recipe failed: {e}")))?;
     if !found {
@@ -1491,7 +1486,6 @@ async fn api_recipe_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
 async fn api_secret_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Admin)?;
     let store = app_context::<TursoStore>(cx);
     let secrets = store.secret_list(raw).await.map_err(|e| bad_request(format!("secrets failed: {e}")))?;
     Ok(Json(json!(secrets)))
@@ -1503,7 +1497,6 @@ async fn api_secret_set(Json(req): Json<SecretBody>, cx: &Cx) -> Result<Json<ser
     let raw: &str = path_param::<BoardId>(cx);
     let name: &str = path_param::<Name>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Admin)?;
     if req.value.trim().is_empty() {
         return Err(bad_request("value must not be empty").into());
     }
@@ -1518,7 +1511,6 @@ async fn api_secret_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let name: &str = path_param::<Name>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Admin)?;
     let store = app_context::<TursoStore>(cx);
     let found = store.secret_remove(raw, name).await.map_err(|e| bad_request(format!("secret failed: {e}")))?;
     if !found {

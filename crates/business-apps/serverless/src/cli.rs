@@ -99,10 +99,10 @@ usage: cli space <verb> [--space <space_id>] [args]
           [--space <id>] remove <path>                   (staging only)
   media   [--space <id>] [--icon <b64>] [--banner <b64>] [--gallery <b64>]* [--clear-gallery]
   config  [--space <id>]                                 board config (incl. hardening rules)
-  config  [--space <id>] set|clear --computed '<json>'    computed/validate/redact rules (admin)
+  config  [--space <id>] set|clear --computed '<json>'    computed/validate/redact rules (any key)
           [--space <id>] [--validate '<json>'] [--redact '<json>']
-  recipes [--space <id>] list|add|enable|disable|remove   event recipes (admin)
-  secrets [--space <id>] list|set|remove                  encrypted app secrets (admin)
+  recipes [--space <id>] list|add|enable|disable|remove   event recipes (any key)
+  secrets [--space <id>] list|set|remove                  encrypted app secrets (any key)
   jobs    [--space <id>] add|list|remove                 cron jobs (admin)
   ttl     [--space <id>] set|clear                       record expiry (admin)
   audit   [--space <id>] on|off|list                     audit trail (admin)
@@ -183,7 +183,8 @@ gallery photo first. Unsupplied flags keep current values. admin+ role."),
         ("space", "config") => Some("\
 cli space config [--space <space_id>]
 prints the board config: title, public_reads, unique key, ttl, rate, audit
-and the computed/validate/redact rules. admin+ role.
+and the computed/validate/redact rules. no role ceiling: any key for the
+space can view or manage rules.
 
 cli space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']
 cli space config clear --computed|--validate|--redact
@@ -192,7 +193,7 @@ writes the pre-write hardening rules: computed is an object of
 of {\"when\": \"<expr>\", \"error\": \"msg\"} rules — the first failing rule
 rejects the write — and redact is an array of JSON paths ([\"$.token\"])
 masked with \"***\" on public reads only. clear resets a rule to unset.
-admin+ role."),
+no role ceiling: any key for the space can manage rules."),
         ("space", "recipes") => Some("\
 cli space recipes list [--space <space_id>]
 cli space recipes add --name n --when <event> [--match '<json>'] \
@@ -204,7 +205,8 @@ the payload (JSON matching), --dedup-on dedupes by a payload path (a
 sha-256 fingerprint column in srv_recipe_runs), --actions is the action
 list, e.g. [{\"$secrets\":{\"url\":\"https://api.example.com?k={{secrets.KEY}}\"}}, {\"http\":{\"url\":\"https://...\"}}].
 recipes dispatch after every write and after each cron run; http actions
-are SSRF-guarded (private/loopback refused). admin+ role."),
+are SSRF-guarded (private/loopback refused). no role ceiling: any key for
+the space can manage recipes."),
         ("space", "secrets") => Some("\
 cli space secrets list [--space <space_id>]
 cli space secrets set --name n --value <secret> [--space <space_id>]
@@ -212,7 +214,7 @@ cli space secrets remove --name n [--space <space_id>]
 encrypted app secrets for recipe actions: values are AES-256-GCM
 encrypted at rest (LAN_SRV_SECRET_KEY) and injected into action templates
 as {{secrets.NAME}}; list shows names + fingerprints only, never values.
-admin+ role."),
+no role ceiling: any key for the space can manage secrets."),
         ("space", "jobs") => Some("\
 cli space jobs add --name n --schedule '*/10 * * * *' --action '{\"type\":\"poll\",\"url\":\"https://...\",\"path\":\"$.a.b\"}'
 cli space jobs list
@@ -1121,7 +1123,6 @@ impl<'a> Cli<'a> {
     async fn space_config(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
         let id = self.space_arg(args, command, SPACE_USAGE)?;
         self.board(&id, command, SPACE_USAGE).await?;
-        self.guard(KeyRole::Admin)?;
         let sub = args.positional();
         let clearing = sub.as_deref() == Some("clear");
         match sub.as_deref() {
@@ -1158,7 +1159,7 @@ impl<'a> Cli<'a> {
                         if clearing { "need at least one of --computed/--validate/--redact" } else { "need --computed/--validate/--redact '<json>' (or 'null' to clear)" },
                         command,
                         SPACE_USAGE,
-                        "cli space config set --computed '[{\"name\":\"total\",\"expr\":\"price * qty\"}]'",
+                        "cli space config set --computed '{\"total\":\"$.price * $.qty\"}'",
                     );
                 }
                 Ok(json!({ "ok": true, "action": if clearing { "clear" } else { "set" }, "keys": touched }))
@@ -1177,7 +1178,6 @@ impl<'a> Cli<'a> {
     async fn space_recipes(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
         let id = self.space_arg(args, command, SPACE_USAGE)?;
         self.board(&id, command, SPACE_USAGE).await?;
-        self.guard(KeyRole::Admin)?;
         match args.positional().as_deref() {
             Some("list") => {
                 let recipes = self
@@ -1260,7 +1260,6 @@ impl<'a> Cli<'a> {
     async fn space_secrets(&self, args: &mut Args<'_>, command: &str) -> CmdResult {
         let id = self.space_arg(args, command, SPACE_USAGE)?;
         self.board(&id, command, SPACE_USAGE).await?;
-        self.guard(KeyRole::Admin)?;
         match args.positional().as_deref() {
             Some("list") => {
                 let secrets = self

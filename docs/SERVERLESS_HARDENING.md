@@ -133,7 +133,7 @@ keys `computed_json`, `validate_json`, `redact_json` (empty string = unset).
 - `secrets_map(board)`: decrypt-all into `HashMap<String,String>` (engine runtime)
 - remove: DELETE by name (uppercase); fingerprint() = sha256 hex (64 chars)
 
-### 1.7 HTTP surface (admin-only except where noted)
+### 1.7 HTTP surface (keyed auth; hardening routes have NO role ceiling)
 ```
 GET    /api/srv/{board}/config      computed/validate/redact (board_config, extended)
 PUT    /api/srv/{board}/config      body {computed?, validate?, redact?} (null clears a key)
@@ -146,11 +146,13 @@ PUT    /api/srv/{board}/secrets/{name}  {value}  (create or rotate)
 DELETE /api/srv/{board}/secrets/{name}
 POST   /api/srv/{board}/events      raw JSON body (or {payload: {...}}) → when=inbound (writer+)
 ```
-All `requires(Admin)` (events: Writer). `when` values: `record.created|record.updated|
+The config/recipes/secrets routes drop the `requires(Admin)` gate — any valid
+space key (reader/writer/admin) can manage them; only `/events` still needs
+writer+. `when` values: `record.created|record.updated|
 record.deleted|inbound|cron:<job.name>` — anything else is skipped at dispatch. Config GET
 (extend `board_config` in ops.rs) already returns computed/validate/redact.
 
-### 1.8 CLI verbs (`cli` single MCP tool, admin+)
+### 1.8 CLI verbs (`cli` single MCP tool; hardening verbs, no role ceiling)
 ```
 cli space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']
 cli space config clear --computed|--validate|--redact
@@ -232,3 +234,9 @@ dump/restore, console panels. Committed `ffcc0c9`, `d2c98bf`, `1297b5a` + pushed
   `write_meta_kv` used `{:?}` escaping — JSON values with embedded quotes corrupted on
   round-trip; now JSON-encoded on write, JSON-decoded on read.
 - Step 10 (this file): finalize. Release build, deploy restart, live E2E, commit + push pending.
+- Committed `758129f` (all steps) and `b878069` (cli `config clear` double-`positional()` bug +
+  stale config help text). Live-verified via the MCP CLI (rules/recipes/secrets on the DELIVERY
+  board) with role-guard checks: reader keys were forbidden.
+- Step 11: removed the admin ceiling on the hardening surface — `requires(Admin)` dropped from
+  config/recipes/secrets REST routes, `guard(Admin)` dropped from the three CLI verbs; help
+  layers and docs updated to "any key". Console panels still session-guarded as before.
