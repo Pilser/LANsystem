@@ -237,10 +237,55 @@ Covered today in both repos unless noted:
   trail, TTL; dump/restore; media + static deploy;
 - REST surface + `cli` MCP tool with public help layers.
 
+## Bug catalogue (found while implementing + live-testing gaps 1–5)
+
+Apply these to any repo porting the gaps (zerowrapper / whatsapp4agents) —
+every one of these was found by live E2E, not by unit tests:
+
+1. **Double-encoded string config in meta.toml.** `board_config_set` writes
+   `serde_json::to_string(value)`; for a JSON *string* value the stored line
+   ends up `key = "\"value\""` and `read_meta`'s single `from_str::<String>`
+   decode leaves the quotes ON — so the HMAC secret was `"s3cr3t-w00k"` (with
+   quotes) and every signed `POST /events` got 401. Fix: decode one layer on
+   read (`webhook_secret()` does `from_str::<String>(&s).unwrap_or(s)`).
+   Object/array values are unaffected (no surrounding quotes). **Check any
+   config key that stores a plain string.**
+2. **Route guards can silently vanish in a refactor — and the CLI bypasses
+   REST.** The scope checks on `record set/patch/delete` were written but never
+   landed on disk (tooling error); a live customer key immediately deleted
+   another customer's record. Worse: the CLI calls the store directly, so
+   scope enforcement in routes is not enough — a customer key through
+   `cli records list` would see everything. Fixes: (a) verify each write
+   surface with a real scoped key before trusting it, (b) refuse customer
+   keys at the CLI layer entirely (`staff_guard`: "storefront REST only").
+   **Check every read/write path, not just the ones you think are public.**
+3. **SSE realtime stream leaks across customers.** `GET /events` replays 500
+   events and live-broadcasts every payload to subscribers; there is no
+   per-subscriber scope filter, so a customer key could watch all records.
+   Fix: `requires_staff(Reader)` on the stream route — customer keys get 403
+   (blocking, not filtering — live cross-customer events can't be scoped
+   cheaply). **Check your websocket/SSE surface for the same hole.**
+4. **`config clear` double-consumed a positional.** The CLI verb called
+   `args.positional()` twice; the second call returned the next token, so
+   `clear` fell through to the `set` path (`--computed is not valid JSON`).
+   Fix: bind `let sub = args.positional();` once. **Check any CLI subcommand
+   that reads its verb twice.**
+5. **Migrations: guard `ALTER TABLE` and don't trust a copy.** `ADD COLUMN`
+   must tolerate "already exists" (it runs on every board open). Debugging
+   note: copying only `board.db` without the `-wal` file shows the pre-
+   migration schema and sends you hunting a phantom bug — checkpoint the WAL
+   or copy both.
+
 ## Session log
 
 - 2026-08-13 (LANsystem): gaps 1–5 phase-1 implemented and live-verified on
   the DELIVERY board; gap 6 left as plan (A). See commit log for details.
+- 2026-08-13 (LANsystem): gap 5 hardening round — customer keys blocked on
+  aggregate/links/call/delete-filter, the CLI and the SSE stream; bulk inserts
+  force `customer_id`; set/patch/delete on non-owned records 404; `webhook_secret`
+  set/clear surface added (PUT /config + CLI flag) and its double-encoded
+  meta.toml storage fixed (HMAC secret now round-trips); HMAC + scope tests
+  added (30 serverless-app tests).
 - 2026-08-13 (LANsystem): gap 5 hardening round — customer keys blocked on
   aggregate/links/call/delete-filter and the CLI; bulk inserts force
   `customer_id`; set/patch/delete on non-owned records 404; `webhook_secret`
