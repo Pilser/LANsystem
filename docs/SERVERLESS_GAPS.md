@@ -169,7 +169,9 @@ shares one reader key and sees every order.
   `set/patch/delete` 404 on any record that does not carry the scope id, so no
   cross-customer tampering.
 - The CLI itself refuses customer keys (storefront REST only), so the agent
-  tool cannot bypass the scope rules.
+  tool cannot bypass the scope rules. The SSE realtime stream
+  (`GET /events`) is staff-only too (customer keys get 403), since live
+  cross-customer events cannot be scope-filtered per-subscriber.
 
 **Design (phase 2 — sessions, not built).** Storefront login UI, signed
 session cookies / short-lived JWTs, password/OTP auth, order lookup by token —

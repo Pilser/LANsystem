@@ -834,6 +834,7 @@ impl futures_core::Stream for EventStream {
 async fn api_events(cx: &Cx) -> Result<Sse<impl Stream<Item = Result<Event>> + use<>>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     if !board.board_public_reads.unwrap_or(false) && auth.is_none() {
         return Err(unauthorized().into());
     }
