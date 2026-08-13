@@ -284,6 +284,59 @@ impl serverless_recipe::RecipeDb for TursoStore {
         Ok(self.record_set_raw(board_id, seq, payload, writer).await.map(|_| ())?)
     }
 
+    /// `$patch_other`: patch the newest record matching `filter` (raw path —
+    /// no re-dispatch, so recipe chains cannot loop). Returns the patched
+    /// seq, or `None` when nothing matched.
+    async fn record_patch_other(
+        &self,
+        board_id: &str,
+        filter: &Json,
+        patch: &Json,
+        writer: Option<&str>,
+    ) -> anyhow::Result<Option<i64>> {
+        let conns = self.board_conn(board_id).await?;
+        let _guard = conns.lock.lock().await;
+        let parsed = crate::dsl::parse_filter(filter).map_err(|e| anyhow::anyhow!("bad filter: {e}"))?;
+        let (where_clause, params) = Self::filter_sql(&parsed.conds);
+        let sql = format!("SELECT seq, payload FROM srv_records {where_clause} ORDER BY created_at DESC LIMIT 1");
+        let mut stmt = conns
+            .conn
+            .prepare(&sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("patch_other prepare: {e}"))?;
+        let mut rows = stmt
+            .query(Params::Positional(params))
+            .await
+            .map_err(|e| anyhow::anyhow!("patch_other query: {e}"))?;
+        let Some(row) = rows.next().await.map_err(|e| anyhow::anyhow!("patch_other row: {e}"))? else {
+            return Ok(None);
+        };
+        let seq: i64 = row
+            .get_value(0).ok()
+            .and_then(|v| v.as_integer().copied())
+            .unwrap_or(0);
+        let current = row
+            .get_value(1).ok()
+            .and_then(|v| v.as_text().cloned())
+            .unwrap_or_default();
+        let mut payload: Json = serde_json::from_str(&current).map_err(|e| anyhow::anyhow!("stored payload: {e}"))?;
+        crate::dsl::apply_patch(&mut payload, patch).map_err(|e| anyhow::anyhow!("patch: {e}"))?;
+        let text = serde_json::to_string(&payload).map_err(|e| anyhow::anyhow!("encode: {e}"))?;
+        conns
+            .conn
+            .execute(
+                "UPDATE srv_records SET payload = ?, writer = ? WHERE seq = ?",
+                Params::Positional(vec![
+                    SqlValue::Text(text),
+                    SqlValue::Text(writer.unwrap_or("").to_string()),
+                    SqlValue::Integer(seq),
+                ]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("patch_other write: {e}"))?;
+        Ok(Some(seq))
+    }
+
     async fn http_call(
         &self,
         _board_id: &str,

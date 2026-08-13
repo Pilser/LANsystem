@@ -7,7 +7,7 @@
 use crate::actions::{ActionKind, RunReport, apply_action};
 use crate::context::EventContext;
 use crate::rule::{EventKind, Recipe};
-use crate::secrets::Secrets;
+use crate::secrets::{Secrets, substitute_value_ctx};
 use serde_json::{Map, Value};
 
 const MAX_ACTIONS: usize = 50;
@@ -72,6 +72,19 @@ pub trait RecipeDb: Send + Sync {
     /// Dedup bookkeeping for `dedup_on` keys (hashed at rest).
     async fn recipe_ran(&self, board_id: &str, recipe: &str, key: &Value) -> anyhow::Result<bool>;
     async fn recipe_mark_ran(&self, board_id: &str, recipe: &str, key: &Value) -> anyhow::Result<()>;
+
+    /// `$patch_other`: apply a patch ($set/$inc/$dec/$mul/$unset) to the
+    /// first record matching `filter` (same filter syntax as the REST
+    /// surface) on `board_id` — same board when the action omits `board`.
+    /// Returns the patched record's seq, or `None` when nothing matched.
+    /// Raw write path: must NOT re-dispatch recipes.
+    async fn record_patch_other(
+        &self,
+        board_id: &str,
+        filter: &Value,
+        patch: &Value,
+        writer: Option<&str>,
+    ) -> anyhow::Result<Option<i64>>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -160,6 +173,18 @@ impl<'a> Engine<'a> {
                 continue;
             };
             let action_obj = action.get(detail).cloned().unwrap_or_else(|| Value::Object(Map::new()));
+            let action_obj = if dry_run {
+                action_obj
+            } else {
+                match substitute_value_ctx(secrets, ctx, &action_obj) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.logs.push(format!("{kind:?}: {e} — action skipped"));
+                        i += 1;
+                        continue;
+                    }
+                }
+            };
             if let Some(cond) = action_condition(action) {
                 match serverless_expr::truthy(&cond, &payload) {
                     Ok(true) => {}
@@ -205,6 +230,7 @@ impl<'a> Engine<'a> {
     ) -> anyhow::Result<()> {
         match kind {
             ActionKind::UpsertOther => self.external_upsert(action, ctx).await?,
+            ActionKind::PatchOther => self.external_patch_other(action, ctx).await?,
             ActionKind::Notify | ActionKind::Call => self.external_call(action, ctx, report).await?,
             ActionKind::Schedule => self.external_schedule(action, ctx).await?,
             _ => {}
@@ -217,11 +243,25 @@ impl<'a> Engine<'a> {
         let board = map
             .get("board")
             .and_then(|b| b.as_str())
-            .ok_or_else(|| anyhow::anyhow!("$upsert_other needs \"board\""))?;
+            .map(str::to_string)
+            .unwrap_or_else(|| ctx.board_id.clone());
         let payload = map.get("payload").cloned().unwrap_or_else(|| Value::Object(Map::new()));
         self.db
-            .record_insert(board, &payload, Some(&format!("recipe:{}", ctx.board_id)), true)
+            .record_insert(&board, &payload, Some(&format!("recipe:{}", ctx.board_id)), true)
             .await?;
+        Ok(())
+    }
+
+    async fn external_patch_other(&self, action: &Value, ctx: &EventContext) -> anyhow::Result<()> {
+        let map = action.as_object().ok_or_else(|| anyhow::anyhow!("$patch_other must be an object"))?;
+        let board = map
+            .get("board")
+            .and_then(|b| b.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| ctx.board_id.clone());
+        let filter = map.get("filter").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        let patch = map.get("patch").cloned().ok_or_else(|| anyhow::anyhow!("$patch_other needs \"patch\""))?;
+        self.db.record_patch_other(&board, &filter, &patch, Some(&format!("recipe:{}", ctx.board_id))).await?;
         Ok(())
     }
 

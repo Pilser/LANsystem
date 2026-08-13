@@ -1253,7 +1253,7 @@ async fn issue_key(Form(form): Form<RoleForm>, cx: &Cx) -> Result {
     };
     let writer = empty_to_none(form.writer.as_deref()).map(str::to_string);
     let (bucket, secret) = store
-        .key_issue(NO_TENANT, raw, role, writer.as_deref())
+        .key_issue(NO_TENANT, raw, role, writer.as_deref(), None)
         .await
         .map_err(|e| bad_request(format!("key issue failed: {e}")))?;
     let token = format!("{raw}:{bucket}:{secret}");
@@ -2396,10 +2396,23 @@ pub(crate) fn requires(auth: &Option<ApiAuth>, min: KeyRole) -> Result<()> {
     };
     let ok = match min {
         KeyRole::Reader => true,
-        KeyRole::Writer => have != KeyRole::Reader,
+        // Customer keys may write records (their own, scope-enforced).
+        KeyRole::Writer => matches!(have, KeyRole::Writer | KeyRole::Admin | KeyRole::Customer),
         KeyRole::Admin => have == KeyRole::Admin,
+        // Customer only passes reader gates; Writer gates handled above.
+        KeyRole::Customer => matches!(have, KeyRole::Customer | KeyRole::Reader | KeyRole::Writer | KeyRole::Admin),
     };
     if ok { Ok(()) } else { Err(forbidden().into()) }
+}
+
+/// Like `requires`, but a `customer` key NEVER passes — for staff surfaces
+/// (rules/recipes/secrets/config/keys/hooks/events) that must not be
+/// reachable with a customer credential.
+pub(crate) fn requires_staff(auth: &Option<ApiAuth>, min: KeyRole) -> Result<()> {
+    if matches!(auth, Some(ApiAuth::Key(k)) if k.role == KeyRole::Customer) {
+        return Err(forbidden().into());
+    }
+    requires(auth, min)
 }
 
 pub(crate) fn writer_of(auth: &Option<ApiAuth>) -> Option<String> {

@@ -186,13 +186,16 @@ prints the board config: title, public_reads, unique key, ttl, rate, audit
 and the computed/validate/redact rules. no role ceiling: any key for the
 space can view or manage rules.
 
-cli space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']
-cli space config clear --computed|--validate|--redact
+cli space config set --computed '<json>' [--validate '<json>'] [--redact '<json>'] \
+       [--webhook-secret '<secret>']
+cli space config clear --computed|--validate|--redact|--webhook-secret
 writes the pre-write hardening rules: computed is an object of
 {field: expr} (e.g. {\"total\": \"$.price * $.qty\"}), validate is an array
 of {\"when\": \"<expr>\", \"error\": \"msg\"} rules — the first failing rule
 rejects the write — and redact is an array of JSON paths ([\"$.token\"])
-masked with \"***\" on public reads only. clear resets a rule to unset.
+masked with \"***\" on public reads only. --webhook-secret sets the secret
+used to HMAC-verify POST /events payloads (X-Hub-Signature-256: sha256=<hex>).
+clear resets a rule to unset.
 no role ceiling: any key for the space can manage rules."),
         ("space", "recipes") => Some("\
 cli space recipes list [--space <space_id>]
@@ -544,6 +547,25 @@ impl<'a> Cli<'a> {
         }
     }
 
+    fn customer(&self) -> bool {
+        matches!(
+            &self.auth,
+            ApiAuth::Key(k) if k.role == KeyRole::Customer
+        )
+    }
+
+    fn staff_guard(&self, command: &str, usage: &str) -> Result<(), Value> {
+        if self.customer() {
+            return Err(err_json(
+                "forbidden: customer keys cannot use the CLI (storefront REST only)",
+                command,
+                usage,
+                "",
+            ));
+        }
+        self.guard(KeyRole::Reader)
+    }
+
     pub async fn run(&self, tokens: &[String]) -> CmdResult {
         let command = tokens.join(" ");
         // help layers (fully public — no space, no key needed)
@@ -800,6 +822,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Writer)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(payload_raw) = args.positional() else {
             return self.err("missing '<json>' payload", command, RECORDS_USAGE, "single-quoted JSON, e.g. '{\"email\":\"a@b.c\"}'");
         };
@@ -818,6 +841,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Reader)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let limit = args.val_after("--limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(25).clamp(1, 500);
         let offset = args.val_after("--offset").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
         let items = self
@@ -832,6 +856,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Reader)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(seq) = args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()) else {
             return self.err("missing --seq N", command, RECORDS_USAGE, "e.g. --seq 3");
         };
@@ -846,6 +871,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Writer)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         if let Some(filter_raw) = args.val_after("--filter") {
             let filter_value: Value = serde_json::from_str(&filter_raw)
                 .map_err(|e| err_json(&format!("filter is not valid JSON: {e}"), command, RECORDS_USAGE, ""))?;
@@ -873,6 +899,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Reader)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let count = self.store.record_count(NO_TENANT, &id).await.unwrap_or(0);
         Ok(json!({ "ok": true, "count": count }))
     }
@@ -890,7 +917,7 @@ impl<'a> Cli<'a> {
         let writer = args.val_after("--writer");
         let (bucket, secret) = self
             .store
-            .key_issue(NO_TENANT, &id, role, writer.as_deref())
+            .key_issue(NO_TENANT, &id, role, writer.as_deref(), None)
             .await
             .map_err(|e| err_json(&format!("key issue failed: {e}"), command, KEYS_USAGE, ""))?;
         Ok(json!({ "ok": true, "bucket": bucket, "token": format!("{id}:{bucket}:{secret}"), "note": "shown once" }))
@@ -944,6 +971,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Writer)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(seq) = args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()) else {
             return self.err("missing --seq N", command, RECORDS_USAGE, "e.g. --seq 3");
         };
@@ -963,6 +991,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Writer)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(seq) = args.val_after("--seq").and_then(|v| v.parse::<i64>().ok()) else {
             return self.err("missing --seq N", command, RECORDS_USAGE, "e.g. --seq 3");
         };
@@ -983,6 +1012,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Reader)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(path) = args.val_after("--path").filter(|p| !p.is_empty()) else {
             return self.err("missing --path a.b", command, RECORDS_USAGE, "a JSON path, e.g. --path profile.name");
         };
@@ -1001,6 +1031,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Reader)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(filter_raw) = args.val_after("--filter") else {
             return self.err("missing --filter '<json>'", command, RECORDS_USAGE, "[{\"field\":\"a.b\",\"op\":\"gt\",\"value\":100}]");
         };
@@ -1024,6 +1055,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Reader)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(q) = args.val_after("--q").filter(|q| !q.is_empty()) else {
             return self.err("missing --q <text>", command, RECORDS_USAGE, "the text to search for");
         };
@@ -1041,6 +1073,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Reader)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(op) = args.val_after("--op").as_deref().and_then(crate::dsl::Agg::parse) else {
             return self.err("missing or invalid --op", command, RECORDS_USAGE, "count|sum|avg|min|max");
         };
@@ -1068,6 +1101,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Writer)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let mut payloads = Vec::new();
         while let Some(raw) = args.positional() {
             let payload: Value = serde_json::from_str(&raw)
@@ -1090,6 +1124,7 @@ impl<'a> Cli<'a> {
         let id = self.space_arg(args, command, RECORDS_USAGE)?;
         self.board(&id, command, RECORDS_USAGE).await?;
         self.guard(KeyRole::Writer)?;
+        self.staff_guard(command, RECORDS_USAGE)?;
         let Some(url) = args.positional().filter(|u| crate::netguard::valid_url(u)) else {
             return self.err("missing or unsafe <url>", command, RECORDS_USAGE, "public http(s) URL only (SSRF-guarded)");
         };
@@ -1128,6 +1163,19 @@ impl<'a> Cli<'a> {
         match sub.as_deref() {
             Some("set") | Some("clear") => {
                 let mut touched: Vec<String> = Vec::new();
+                let webhook_secret: Option<Result<Option<String>, Value>> = if clearing {
+                    if args.has("--webhook-secret") { Some(Ok(None)) } else { None }
+                } else {
+                    args.val_after("--webhook-secret").map(|v| {
+                        if v == "null" {
+                            Ok(None)
+                        } else if v.is_empty() {
+                            Err(err_json("--webhook-secret must not be empty", command, SPACE_USAGE, ""))
+                        } else {
+                            Ok(Some(v.to_string()))
+                        }
+                    })
+                };
                 for (flag, key) in [
                     ("--computed", "computed_json"),
                     ("--validate", "validate_json"),
@@ -1154,12 +1202,21 @@ impl<'a> Cli<'a> {
                         .map_err(|e| err_json(&format!("config failed: {e}"), command, SPACE_USAGE, ""))?;
                     touched.push(flag.trim_start_matches("--").to_string());
                 }
+                if let Some(res) = webhook_secret {
+                    let v = res?;
+                    let value = v.as_ref().map(|s| json!(s));
+                    self.store
+                        .board_config_set(&id, "webhook_secret", value.as_ref())
+                        .await
+                        .map_err(|e| err_json(&format!("config failed: {e}"), command, SPACE_USAGE, ""))?;
+                    touched.push("webhook_secret".to_string());
+                }
                 if touched.is_empty() {
                     return self.err(
-                        if clearing { "need at least one of --computed/--validate/--redact" } else { "need --computed/--validate/--redact '<json>' (or 'null' to clear)" },
+                        if clearing { "need at least one of --computed/--validate/--redact/--webhook-secret" } else { "need --computed/--validate/--redact '<json>' or --webhook-secret '<secret>' (or 'null' to clear)" },
                         command,
                         SPACE_USAGE,
-                        "cli space config set --computed '{\"total\":\"$.price * $.qty\"}'",
+                        "cli space config set --computed '{\"total\":\"$.price * $.qty\"}' --webhook-secret 's3cr3t'",
                     );
                 }
                 Ok(json!({ "ok": true, "action": if clearing { "clear" } else { "set" }, "keys": touched }))

@@ -51,6 +51,7 @@ bytes = "1"
 serverless-core = { path = "crates/serverless-core" }
 turso = { path = "turso/bindings/rust" }
 sha2 = "0.10"
+hmac = "0.12"
 rand = "0.9"
 chrono = "0.4"
 anyhow = "1"

@@ -69,6 +69,10 @@ impl RecipeDb for MockDb {
     async fn recipe_mark_ran(&self, _board_id: &str, _recipe: &str, _key: &Value) -> anyhow::Result<()> {
         Ok(())
     }
+    async fn record_patch_other(&self, _board_id: &str, _filter: &Value, patch: &Value, _writer: Option<&str>) -> anyhow::Result<Option<i64>> {
+        self.sets.lock().unwrap().push((-1, patch.clone()));
+        Ok(Some(42))
+    }
 }
 
 #[tokio::test]
@@ -102,4 +106,61 @@ async fn engine_persists_changes() {
     assert_eq!(payload["total"], json!(30.0));
     assert_eq!(payload["label"], json!("ACME-7"));
     assert_eq!(payload["tags"], json!(["auto"]));
+}
+#[tokio::test]
+async fn action_payload_templates_context_and_payload() {
+    let db = MockDb::default();
+    let recipe = parse_recipe(&json!({
+        "name": "tpl",
+        "when": "record.created",
+        "actions": [
+            {"$upsert_other": {"payload": {"order": "{{payload.id}}", "qty_num": "{{payload.qty}}", "board_ref": "{{board}}", "ev": "{{kind}}", "w": "{{writer}}"}}},
+            {"$patch_other": {"filter": [{"field": "sku", "op": "eq", "value": "A1"}], "patch": {"$inc": {"stock": "{{payload.qty}}"}}}}
+        ]
+    })).unwrap();
+    let ctx = EventContext::record_created("b1", 7, &json!({"id": 3, "qty": 2}), Some("alice"));
+    let out = Engine { db: &db }.run_recipe(&recipe, &Secrets::new(), &ctx, false).await;
+    assert!(out.matched, "expected recipe to match");
+    assert!(out.report.logs.is_empty(), "no logs expected, got {:#?}", out.report.logs);
+    let external = &out.report.external;
+    assert_eq!(external.len(), 2);
+    assert_eq!(external[0]["payload"]["order"], json!(3));
+    assert_eq!(external[0]["payload"]["qty_num"], json!(2));
+    assert_eq!(external[0]["payload"]["board_ref"], json!("b1"));
+    assert_eq!(external[0]["payload"]["ev"], json!("record.created"));
+    assert_eq!(external[0]["payload"]["w"], json!("alice"));
+    assert_eq!(external[1]["patch"]["$inc"]["stock"], json!(2));
+}
+
+#[tokio::test]
+async fn unknown_template_token_skips_action_with_log() {
+    let db = MockDb::default();
+    let recipe = parse_recipe(&json!({
+        "name": "bad-tpl",
+        "when": "inbound",
+        "actions": [{"$upsert_other": {"payload": {"x": "{{payload.nope.missing}}"}}}]
+    })).unwrap();
+    let ctx = EventContext::inbound("b1", &json!({"a": 1}));
+    let out = Engine { db: &db }.run_recipe(&recipe, &Secrets::new(), &ctx, false).await;
+    assert!(out.matched);
+    assert!(out.report.logs.iter().any(|l| l.contains("unknown template token") && l.contains("action skipped")), "logs: {:#?}", out.report.logs);
+    assert!(out.report.external.is_empty(), "action must not run on bad template");
+}
+
+#[tokio::test]
+async fn secrets_and_context_substitute_together() {
+    let mut secrets = Secrets::new();
+    secrets.insert("API", "sk-1");
+    let db = MockDb::default();
+    let recipe = parse_recipe(&json!({
+        "name": "sec-tpl",
+        "when": "record.created",
+        "actions": [{"$call": {"url": "https://x.example/h/{{payload.id}}", "headers": {"auth": "Bearer {{API}}"}, "body": {"amt": "{{payload.total}}"}}}]
+    })).unwrap();
+    let ctx = EventContext::record_created("b1", 1, &json!({"id": 9, "total": 12.5}), None);
+    let out = Engine { db: &db }.run_recipe(&recipe, &secrets, &ctx, false).await;
+    let ext = &out.report.external[0];
+    assert_eq!(ext["url"], json!("https://x.example/h/9"));
+    assert_eq!(ext["headers"]["auth"], json!("Bearer sk-1"));
+    assert_eq!(ext["body"]["amt"], json!(12.5));
 }

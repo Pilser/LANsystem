@@ -345,6 +345,11 @@ impl TursoStore {
         .await
         .map_err(|e| ServerlessError::Db(format!("migrate {db_path:?}: {e}")))?;
 
+        // v2: customer-scoped keys — tolerated on boards created before the column.
+        let _ = conn
+            .execute("ALTER TABLE srv_keys ADD COLUMN scope TEXT", Params::None)
+            .await;
+
         let conns = Arc::new(BoardConn { conn, lock: Mutex::new(()) });
         self.conns.lock().await.insert(board_id.to_string(), conns.clone());
         Ok(conns)
@@ -474,10 +479,11 @@ impl TursoStore {
         let bucket = row.get_value(0).ok().and_then(|v| v.as_text().cloned()).unwrap_or_default();
         let role = row.get_value(1).ok().and_then(|v| v.as_text().cloned()).unwrap_or_default();
         let writer = row.get_value(2).ok().and_then(|v| v.as_text().cloned()).filter(|s| !s.is_empty());
-        let created_at = row.get_value(3).ok().and_then(|v| v.as_text().cloned()).unwrap_or_default();
-        let revoked_at = row.get_value(4).ok().and_then(|v| v.as_text().cloned());
+        let scope = row.get_value(3).ok().and_then(|v| v.as_text().cloned()).filter(|s| !s.is_empty());
+        let created_at = row.get_value(4).ok().and_then(|v| v.as_text().cloned()).unwrap_or_default();
+        let revoked_at = row.get_value(5).ok().and_then(|v| v.as_text().cloned());
         let role = serde_json::from_str::<KeyRole>(&format!("\"{role}\"")).unwrap_or(KeyRole::Reader);
-        SrvApiKey { bucket, role, writer, created_at, revoked_at }
+        SrvApiKey { bucket, role, writer, scope, created_at, revoked_at }
     }
 
     /// Read hook rows (caller holds the board lock).
@@ -871,6 +877,7 @@ impl BoardStore for TursoStore {
         board_id: &str,
         role: KeyRole,
         writer: Option<&str>,
+        scope: Option<&str>,
     ) -> serverless_core::Result<(String, String)> {
         let _ = tenant_id;
         let conns = self.board_conn(board_id).await?;
@@ -881,11 +888,12 @@ impl BoardStore for TursoStore {
         conns
             .conn
             .execute(
-                "INSERT INTO srv_keys (bucket, role, writer, secret_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO srv_keys (bucket, role, writer, scope, secret_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 Params::Positional(vec![
                     SqlValue::Text(bucket.clone()),
                     SqlValue::Text(role.as_str().to_string()),
                     SqlValue::Text(writer.unwrap_or("").to_string()),
+                    SqlValue::Text(scope.unwrap_or("").to_string()),
                     SqlValue::Text(hash),
                     SqlValue::Text(Self::now_millis()),
                 ]),
@@ -901,7 +909,7 @@ impl BoardStore for TursoStore {
         let _guard = conns.lock.lock().await;
         let mut stmt = conns
             .conn
-            .prepare("SELECT bucket, role, writer, created_at, revoked_at FROM srv_keys ORDER BY created_at DESC")
+            .prepare("SELECT bucket, role, writer, scope, created_at, revoked_at FROM srv_keys ORDER BY created_at DESC")
             .await
             .map_err(|e| ServerlessError::Db(e.to_string()))?;
         let mut rows = stmt
@@ -949,7 +957,7 @@ impl BoardStore for TursoStore {
         let mut stmt = conns
             .conn
             .prepare(
-                "SELECT bucket, role, writer, created_at, revoked_at, secret_hash \
+                "SELECT bucket, role, writer, scope, created_at, revoked_at, secret_hash \
                  FROM srv_keys WHERE bucket = ?",
             )
             .await
@@ -966,7 +974,7 @@ impl BoardStore for TursoStore {
             return Ok(None);
         }
         let stored = row
-            .get_value(5).ok()
+            .get_value(6).ok()
             .and_then(|v| v.as_text().cloned())
             .unwrap_or_default();
         if Self::hash_secret(board_id, &key.bucket, key_secret) != stored {

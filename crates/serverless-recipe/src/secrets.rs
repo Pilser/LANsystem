@@ -1,3 +1,5 @@
+use crate::context::EventContext;
+use crate::rule::EventKind;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -82,6 +84,154 @@ pub fn substitute_value(secrets: &Secrets, v: &Value) -> Value {
             Value::Object(out)
         }
         other => other.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context templating: `{{payload.a.b}}`, `{{seq}}`, `{{kind}}`, `{{board}}`,
+// `{{writer}}`, `{{cron}}` plus the legacy `{{NAME}}` secret syntax. A string
+// that is exactly one token resolves to its raw JSON value (numbers stay
+// numbers, so `{"$inc": {"stock": "{{payload.qty}}"}}` works); tokens inside
+// longer strings resolve to their string form. Unknown tokens fail the
+// substitution (the caller skips the action and logs).
+// ---------------------------------------------------------------------------
+
+pub enum SubstitutionError {
+    Unknown(String),
+}
+
+impl std::fmt::Display for SubstitutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubstitutionError::Unknown(token) => write!(f, "unknown template token {token:?}"),
+        }
+    }
+}
+
+impl EventKind {
+    /// `record.created` / `record.updated` / `record.deleted` / `inbound` /
+    /// `cron:<job>` — the same strings recipes store in `when_json`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventKind::Created => "record.created",
+            EventKind::Updated => "record.updated",
+            EventKind::Deleted => "record.deleted",
+            EventKind::Inbound => "inbound",
+            EventKind::Cron => "cron",
+        }
+    }
+}
+
+fn ctx_scalar(ctx: &EventContext, name: &str) -> Option<Value> {
+    Some(match name {
+        "seq" => Value::Number(ctx.seq?.into()),
+        "kind" => Value::String(ctx.kind.as_str().to_string()),
+        "board" => Value::String(ctx.board_id.clone()),
+        "writer" => Value::String(ctx.writer.clone().unwrap_or_default()),
+        "cron" => Value::String(ctx.cron_name.clone().unwrap_or_default()),
+        _ => return None,
+    })
+}
+
+/// Resolve one `{{token}}` to its raw value: payload paths first, then the
+/// context scalars, then the secrets map (legacy bare names).
+pub fn resolve_token(
+    secrets: &Secrets,
+    ctx: &EventContext,
+    token: &str,
+) -> Result<Option<Value>, SubstitutionError> {
+    let t = token.trim();
+    if let Some(path) = t.strip_prefix("payload") {
+        let path = path.trim_start_matches('.');
+        let v = if path.is_empty() {
+            ctx.payload.clone()
+        } else if path.starts_with('$') {
+            serverless_expr::get_path(&ctx.payload, path)
+        } else {
+            serverless_expr::get_path(&ctx.payload, &format!("$.{path}"))
+        };
+        if v.is_null() {
+            return Err(SubstitutionError::Unknown(t.to_string()));
+        }
+        return Ok(Some(v));
+    }
+    if let Some(v) = ctx_scalar(ctx, t) {
+        return Ok(Some(v));
+    }
+    if let Some(v) = secrets.get(t) {
+        return Ok(Some(Value::String(v.to_string())));
+    }
+    Err(SubstitutionError::Unknown(t.to_string()))
+}
+
+/// String form of a resolved value: strings as-is, everything else JSON.
+fn value_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Substitute context + secrets into one string. A string that is exactly
+/// one `{{token}}` returns the token's raw value (caller decides JSON-ness).
+pub fn substitute_string(
+    secrets: &Secrets,
+    ctx: &EventContext,
+    input: &str,
+) -> Result<Value, SubstitutionError> {
+    if let Some(token) = input.strip_prefix("{{").and_then(|s| s.strip_suffix("}}")) {
+        if !token.contains("{{") {
+            if let Some(v) = resolve_token(secrets, ctx, token)? {
+                return Ok(v);
+            }
+        }
+    }
+    let mut out = String::new();
+    let mut rest = input;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            out.push_str(rest);
+            return Ok(Value::String(out));
+        };
+        let token = &after[..end];
+        let v = resolve_token(secrets, ctx, token)?;
+        match v {
+            Some(v) => out.push_str(&value_str(&v)),
+            None => return Err(SubstitutionError::Unknown(token.to_string())),
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    Ok(Value::String(out))
+}
+
+/// Recursively substitute context + secrets into a JSON value. Strings that
+/// are exactly one template token become the token's raw JSON value; other
+/// strings get inline substitution.
+pub fn substitute_value_ctx(
+    secrets: &Secrets,
+    ctx: &EventContext,
+    v: &Value,
+) -> Result<Value, SubstitutionError> {
+    match v {
+        Value::String(s) => substitute_string(secrets, ctx, s),
+        Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for x in arr {
+                out.push(substitute_value_ctx(secrets, ctx, x)?);
+            }
+            Ok(Value::Array(out))
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                out.insert(k.clone(), substitute_value_ctx(secrets, ctx, val)?);
+            }
+            Ok(Value::Object(out))
+        }
+        other => Ok(other.clone()),
     }
 }
 

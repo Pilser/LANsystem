@@ -271,7 +271,7 @@ HTTP error in `last_message`, and `replay` re-queued it immediately.
 
 - `space show` returns the full config (title, public_reads, unique key,
   record count, deployed_at) — plus new verbs:
-  - `space config` — prints ttl/rate/audit/unique-key settings (reader+)
+  - `space config` — prints ttl/rate/audit/unique-key + hardening rules (reader+)
   - `space ttl set --seconds N --field <path>` / `space ttl clear` —
     records whose `payload[field]` (unix seconds) is past
     `now + N` are **hidden from all reads** (list/get/search/filter/
@@ -293,16 +293,19 @@ HTTP error in `last_message`, and `replay` re-queued it immediately.
 ### 6.7 Hardening (computed/validate/redact, recipes, secrets) — implemented
 
 Write-rule + recipe + secret surface, no role ceiling (any valid space key;
-only `/events` needs writer+):
+`customer` keys NEVER pass; only `/events` needs writer+):
 
 - `space config` now also prints the computed/validate/redact rules; new verbs:
-  - `space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']`
+  - `space config set --computed '<json>' [--validate '<json>'] [--redact '<json>'] \
+    [--webhook-secret '<secret>']`
     — `computed` is an object `{"total": "$.price * $.qty"}` evaluated on every
     write (later fields may reference earlier, alphabetical order);
     `validate` is `[{"when": "<expr>", "error": "msg"}]` — first failing rule
     aborts the write with its message; `redact` is `["$.ssn"]` — paths masked
-    with `"***"` on **public reads** only (stored payload untouched)
-  - `space config clear --computed|--validate|--redact` — unset a rule
+    with `"***"` on **public reads** only (stored payload untouched);
+    `--webhook-secret` sets the HMAC secret for `POST /events` (cleared with
+    `clear --webhook-secret` or `"webhook_secret": null` via PUT /config)
+  - `space config clear --computed|--validate|--redact|--webhook-secret` — unset a rule
   - `space recipes list|add|enable|disable|remove` — `add` takes `--name`,
     `--when record.created|record.updated|record.deleted|inbound|cron:<job.name>`,
     optional `--match '<json>'` / `--dedup-on <path>` / `--disabled`, and
@@ -315,10 +318,17 @@ only `/events` needs writer+):
 - Recipes dispatch after every insert/set/delete and after each cron job run
   (`cron:<job.name>`, payload = polled record or null for http jobs) and on
   `POST /api/srv/{board_id}/events` (body = raw JSON or `{"payload": {...}}`).
+  When the board has a `webhook_secret`, the request must carry
+  `X-Hub-Signature-256: sha256=<hex>` (or `X-Signature: <hex>`) where
+  `hex = HMAC-SHA256(secret, raw_body)` — unsigned/forged → 401. Action
+  templates may use `{{payload.<path>}}`, `{{payload}}`, `{{seq}}`,
+  `{{kind}}`, `{{board}}`, `{{writer}}`, `{{cron}}` + legacy `{{secrets.*}}`;
+  a `$patch_other` action (filter + patch on a board; board optional = the
+  triggering board) writes records without re-dispatching recipes.
   http actions are SSRF-guarded (loopback/private refused), timeout 0.5–60 s,
   2 MB cap.
-- REST for app JS: `PUT /api/srv/{board_id}/config` (computed/validate/redact,
-  null clears), `GET|POST /recipes`, `PUT /recipes/{name}/enabled`,
+- REST for app JS: `PUT /api/srv/{board_id}/config` (computed/validate/redact/
+  webhook_secret, null clears), `GET|POST /recipes`, `PUT /recipes/{name}/enabled`,
   `DELETE /recipes/{name}`, `GET /secrets`, `PUT|DELETE /secrets/{name}`,
   `POST /events`.
 - Console (`/sl/{board}`): "Write rules", "Recipes" and "Secrets" panels with

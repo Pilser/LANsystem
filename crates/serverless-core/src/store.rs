@@ -90,12 +90,16 @@ pub trait BoardStore: Send + Sync {
     // ---- keys ----------------------------------------------------------
 
     /// Issue a key; returns `(bucket, secret)` — the secret is shown once.
+    /// `scope` binds a `customer` key to a customer id (records are
+    /// filtered/enforced to `payload.customer_id == scope`); None for
+    /// reader/writer/admin.
     async fn key_issue(
         &self,
         tenant_id: i64,
         board_id: &str,
         role: KeyRole,
         writer: Option<&str>,
+        scope: Option<&str>,
     ) -> Result<(String, String)>;
 
     async fn key_list(&self, tenant_id: i64, board_id: &str) -> Result<Vec<SrvApiKey>>;

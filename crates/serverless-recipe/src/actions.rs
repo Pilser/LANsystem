@@ -16,6 +16,7 @@ pub enum ActionKind {
     Sort,
     Slice,
     UpsertOther,
+    PatchOther,
     Notify,
     Call,
     Schedule,
@@ -36,6 +37,7 @@ impl ActionKind {
             "$sort" => ActionKind::Sort,
             "$slice" => ActionKind::Slice,
             "$upsert_other" => ActionKind::UpsertOther,
+            "$patch_other" => ActionKind::PatchOther,
             "$notify" => ActionKind::Notify,
             "$call" => ActionKind::Call,
             "$schedule" => ActionKind::Schedule,
@@ -406,6 +408,7 @@ pub fn apply_action(
             report.actions_run.push(format!("$log {rendered}"));
         }
         ActionKind::UpsertOther
+        | ActionKind::PatchOther
         | ActionKind::Notify
         | ActionKind::Call
         | ActionKind::Schedule => {
@@ -429,6 +432,7 @@ fn name_for(kind: &ActionKind) -> &'static str {
         ActionKind::Sort => "$sort",
         ActionKind::Slice => "$slice",
         ActionKind::UpsertOther => "$upsert_other",
+        ActionKind::PatchOther => "$patch_other",
         ActionKind::Notify => "$notify",
         ActionKind::Call => "$call",
         ActionKind::Schedule => "$schedule",

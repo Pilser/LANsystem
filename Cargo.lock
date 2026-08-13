@@ -3955,6 +3955,7 @@ dependencies = [
  "db",
  "futures-core",
  "helix-db",
+ "hmac 0.12.1",
  "jsonschema",
  "platform-auth",
  "platform-core",

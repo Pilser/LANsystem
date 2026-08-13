@@ -33,7 +33,7 @@ path_param!(encoded);
 path_param!(tenant_id);
 path_param!(name);
 
-use super::{ApiAuth, NO_TENANT, RateForm, UrlForm, api_auth, api_auth_unlimited, board_row, resolve_key, requires, truthy, writer_of};
+use super::{ApiAuth, NO_TENANT, RateForm, UrlForm, api_auth, api_auth_unlimited, board_row, resolve_key, requires, requires_staff, truthy, writer_of};
 
 /// `GET /api/srv/{board}`: board meta (public under `public_reads`).
 #[derive(Deserialize)]
@@ -78,16 +78,49 @@ async fn api_board(cx: &Cx) -> Result<Json<serde_json::Value>> {
     })))
 }
 
+/// The customer id bound to a `customer` key (`payload.customer_id` scope).
+fn customer_scope(auth: &Option<ApiAuth>) -> Option<String> {
+    match auth {
+        Some(ApiAuth::Key(k)) if k.role == KeyRole::Customer => k.scope.clone(),
+        _ => None,
+    }
+}
+
+/// In-memory scope filter for list/search/query/filter results.
+fn scope_filter(items: Vec<serverless_core::SrvRecord>, auth: &Option<ApiAuth>) -> Vec<serverless_core::SrvRecord> {
+    let Some(scope) = customer_scope(auth) else { return items };
+    items
+        .into_iter()
+        .filter(|r| r.payload.get("customer_id").and_then(Value::as_str) == Some(scope.as_str()))
+        .collect()
+}
+
+/// Ownership check for customer writes: the record must carry the customer's id.
+async fn record_belongs_to(store: &TursoStore, raw: &str, seq: i64, scope: &str) -> bool {
+    store
+        .record_get(NO_TENANT, raw, seq)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.payload.get("customer_id").and_then(Value::as_str) == Some(scope))
+}
+
 /// `POST /api/srv/{board}/records`: `{"payload": {...}, "upsert": false?}`.
 #[route(POST "/api/srv/{board_id}/records")]
 async fn api_record_insert(Json(req): Json<RecordInsert>, cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
     requires(&auth, KeyRole::Writer)?;
+    let mut payload = req.payload;
+    if let Some(scope) = customer_scope(&auth) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("customer_id".to_string(), Value::String(scope.clone()));
+        }
+    }
     let store = app_context::<TursoStore>(cx);
     let writer = writer_of(&auth);
     let seq = store
-        .record_insert(NO_TENANT, raw, &req.payload, writer.as_deref(), req.upsert)
+        .record_insert(NO_TENANT, raw, &payload, writer.as_deref(), req.upsert)
         .await
         .map_err(|e| bad_request(format!("insert failed: {e}")))?;
     Ok(Json(json!({ "seq": seq, "boardId": raw })))
@@ -146,6 +179,7 @@ async fn api_record_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
             .await
             .map_err(|e| bad_request(format!("list failed: {e}")))?
     };
+    let items = scope_filter(items, &auth);
     Ok(Json(json!({ "items": items })))
 }
 
@@ -163,7 +197,14 @@ async fn api_record_get(cx: &Cx) -> Result<Json<serde_json::Value>> {
     };
     let store = app_context::<TursoStore>(cx);
     match store.record_get(NO_TENANT, raw, seq).await {
-        Ok(Some(rec)) => Ok(Json(json!(rec))),
+        Ok(Some(rec)) => {
+            if let Some(scope) = customer_scope(&auth) {
+                if rec.payload.get("customer_id").and_then(Value::as_str) != Some(scope.as_str()) {
+                    return Err(not_found().into());
+                }
+            }
+            Ok(Json(json!(rec)))
+        }
         Ok(None) => Err(not_found().into()),
         Err(e) => Err(bad_request(format!("get failed: {e}")).into()),
     }
@@ -180,6 +221,11 @@ async fn api_record_delete(cx: &Cx) -> Result<Json<serde_json::Value>> {
         return Err(bad_request("invalid seq").into());
     };
     let store = app_context::<TursoStore>(cx);
+    if let Some(scope) = customer_scope(&auth) {
+        if !record_belongs_to(&store, raw, seq, &scope).await {
+            return Err(not_found().into());
+        }
+    }
     let deleted = store
         .record_delete(NO_TENANT, raw, seq)
         .await
@@ -197,11 +243,15 @@ async fn api_key_issue(Json(req): Json<KeyMint>, cx: &Cx) -> Result<Json<serde_j
         Some(r) if r == "reader" => KeyRole::Reader,
         Some(r) if r == "writer" => KeyRole::Writer,
         Some(r) if r == "admin" => KeyRole::Admin,
+        Some(r) if r == "customer" => KeyRole::Customer,
         _ => return Err(bad_request("invalid role").into()),
     };
+    if role == KeyRole::Customer && req.scope.as_deref().filter(|s| !s.trim().is_empty()).is_none() {
+        return Err(bad_request("customer keys need a scope (customer id)").into());
+    }
     let store = app_context::<TursoStore>(cx);
     let (bucket, secret) = store
-        .key_issue(NO_TENANT, raw, role, req.writer.as_deref())
+        .key_issue(NO_TENANT, raw, role, req.writer.as_deref(), req.scope.as_deref())
         .await
         .map_err(|e| bad_request(format!("key issue failed: {e}")))?;
     let token = format!("{raw}:{bucket}:{secret}");
@@ -294,9 +344,18 @@ async fn api_record_set(Json(req): Json<RecordInsert>, cx: &Cx) -> Result<Json<s
         return Err(bad_request("invalid seq").into());
     };
     let store = app_context::<TursoStore>(cx);
+    let mut payload = req.payload;
+    if let Some(scope) = customer_scope(&auth) {
+        if !record_belongs_to(&store, raw, seq, &scope).await {
+            return Err(not_found().into());
+        }
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("customer_id".to_string(), Value::String(scope));
+        }
+    }
     let writer = writer_of(&auth);
     store
-        .record_set(NO_TENANT, raw, seq, &req.payload, writer.as_deref())
+        .record_set(NO_TENANT, raw, seq, &payload, writer.as_deref())
         .await
         .map_err(|e| bad_request(format!("set failed: {e}")))?;
     Ok(Json(json!({ "ok": true, "seq": seq })))
@@ -313,6 +372,11 @@ async fn api_record_patch(Json(req): Json<PatchForm>, cx: &Cx) -> Result<Json<se
         return Err(bad_request("invalid seq").into());
     };
     let store = app_context::<TursoStore>(cx);
+    if let Some(scope) = customer_scope(&auth) {
+        if !record_belongs_to(&store, raw, seq, &scope).await {
+            return Err(not_found().into());
+        }
+    }
     let writer = writer_of(&auth);
     let updated = store
         .record_patch(raw, seq, &req.patch, writer.as_deref())
@@ -326,6 +390,7 @@ async fn api_record_patch(Json(req): Json<PatchForm>, cx: &Cx) -> Result<Json<se
 async fn api_record_aggregate(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     if !board.board_public_reads.unwrap_or(false) && auth.is_none() {
         return Err(unauthorized().into());
     }
@@ -358,9 +423,17 @@ async fn api_record_bulk(Json(req): Json<BulkInsert>, cx: &Cx) -> Result<Json<se
     let (_board, auth) = api_auth(cx, raw).await?;
     requires(&auth, KeyRole::Writer)?;
     let store = app_context::<TursoStore>(cx);
+    let mut payloads = req.payloads;
+    if let Some(scope) = customer_scope(&auth) {
+        for p in payloads.iter_mut() {
+            if let Some(obj) = p.as_object_mut() {
+                obj.insert("customer_id".to_string(), Value::String(scope.clone()));
+            }
+        }
+    }
     let writer = writer_of(&auth);
     let seqs = store
-        .record_bulk_insert(raw, req.payloads, writer.as_deref())
+        .record_bulk_insert(raw, payloads, writer.as_deref())
         .await
         .map_err(|e| bad_request(format!("bulk failed: {e}")))?;
     Ok(Json(json!({ "seqs": seqs, "count": seqs.len() })))
@@ -372,7 +445,7 @@ async fn api_record_bulk(Json(req): Json<BulkInsert>, cx: &Cx) -> Result<Json<se
 async fn api_record_delete_filter(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Writer)?;
+    requires_staff(&auth, KeyRole::Writer)?;
     let Some(filter) = parse_query_params::<FilterQuery>(cx).ok().and_then(|f| f.filter) else {
         return Err(bad_request("missing filter query param").into());
     };
@@ -394,7 +467,7 @@ async fn api_link_set(Json(req): Json<LinkForm>, cx: &Cx) -> Result<Json<serde_j
     let raw: &str = path_param::<BoardId>(cx);
     let seq: &str = path_param::<Seq>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Writer)?;
+    requires_staff(&auth, KeyRole::Writer)?;
     let Ok(seq) = seq.parse::<i64>() else {
         return Err(bad_request("invalid seq").into());
     };
@@ -415,6 +488,7 @@ async fn api_link_get(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let seq: &str = path_param::<Seq>(cx);
     let (board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     if !board.board_public_reads.unwrap_or(false) && auth.is_none() {
         return Err(unauthorized().into());
     }
@@ -432,7 +506,7 @@ async fn api_link_clear(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let seq: &str = path_param::<Seq>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Writer)?;
+    requires_staff(&auth, KeyRole::Writer)?;
     let Ok(seq) = seq.parse::<i64>() else {
         return Err(bad_request("invalid seq").into());
     };
@@ -455,7 +529,7 @@ async fn api_link_clear(cx: &Cx) -> Result<Json<serde_json::Value>> {
 async fn api_record_call(Json(req): Json<CallBody>, cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Writer)?;
+    requires_staff(&auth, KeyRole::Writer)?;
     let Some(url) = req.url.filter(|u| crate::netguard::valid_url(u)) else {
         return Err(bad_request("url rejected (public http(s) only)").into());
     };
@@ -1350,6 +1424,9 @@ pub(crate) struct KeyMint {
     pub role: Option<String>,
     #[serde(default)]
     pub writer: Option<String>,
+    /// Customer id for `role: "customer"` (records scoped to it).
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1370,12 +1447,30 @@ pub(crate) struct HookMint {
 type ConfigSetForm = serde_json::Map<String, Value>;
 
 /// `PUT /api/srv/{board}/config` — set/clear `computed` / `validate` /
-/// `redact` rules (`null` clears a key). Rules apply on the next write.
+/// `redact` rules (`null` clears a key) and the `webhook_secret` used to
+/// HMAC-verify `POST /events` payloads. Rules apply on the next write.
 #[route(PUT "/api/srv/{board_id}/config")]
-async fn api_config_set(Json(req): Json<ConfigSetForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+async fn api_config_set(Json(mut req): Json<ConfigSetForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     let mut touched: Vec<(&str, bool)> = Vec::new();
+    if let Some(value) = req.get("webhook_secret") {
+        let store = app_context::<TursoStore>(cx);
+        if value.is_null() {
+            store.board_config_set(raw, "webhook_secret", None).await.map_err(|e| bad_request(format!("config failed: {e}")))?;
+        } else {
+            let Some(secret) = value.as_str() else {
+                return Err(bad_request("webhook_secret must be a string (or null to clear)").into());
+            };
+            if secret.is_empty() {
+                return Err(bad_request("webhook_secret must not be empty").into());
+            }
+            store.board_config_set(raw, "webhook_secret", Some(value)).await.map_err(|e| bad_request(format!("config failed: {e}")))?;
+        }
+        touched.push(("webhook_secret", !value.is_null()));
+        req.remove("webhook_secret");
+    }
     for (key, json_key) in [("computed", "computed_json"), ("validate", "validate_json"), ("redact", "redact_json")] {
         let Some(value) = req.get(key) else { continue };
         if value.is_null() {
@@ -1392,7 +1487,7 @@ async fn api_config_set(Json(req): Json<ConfigSetForm>, cx: &Cx) -> Result<Json<
         touched.push((key, true));
     }
     if touched.is_empty() {
-        return Err(bad_request("nothing to set: use computed/validate/redact (null clears)").into());
+        return Err(bad_request("nothing to set: use computed/validate/redact/webhook_secret (null clears)").into());
     }
     Ok(Json(json!({ "ok": true, "set": touched })))
 }
@@ -1431,6 +1526,7 @@ pub(crate) struct SecretBody {
 async fn api_recipe_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     let store = app_context::<TursoStore>(cx);
     let recipes = store.recipe_list(raw).await.map_err(|e| bad_request(format!("recipes failed: {e}")))?;
     Ok(Json(json!(recipes)))
@@ -1441,6 +1537,7 @@ async fn api_recipe_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
 async fn api_recipe_add(Json(req): Json<RecipeForm>, cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     if req.name.trim().is_empty() || req.when.trim().is_empty() {
         return Err(bad_request("need name and when").into());
     }
@@ -1458,6 +1555,7 @@ async fn api_recipe_enabled(Json(req): Json<EnabledBody>, cx: &Cx) -> Result<Jso
     let raw: &str = path_param::<BoardId>(cx);
     let name: &str = path_param::<Name>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     let store = app_context::<TursoStore>(cx);
     let found = store.recipe_set_enabled(raw, name, req.enabled).await.map_err(|e| bad_request(format!("recipe failed: {e}")))?;
     if !found {
@@ -1472,6 +1570,7 @@ async fn api_recipe_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let name: &str = path_param::<Name>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     let store = app_context::<TursoStore>(cx);
     let found = store.recipe_remove(raw, name).await.map_err(|e| bad_request(format!("recipe failed: {e}")))?;
     if !found {
@@ -1486,6 +1585,7 @@ async fn api_recipe_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
 async fn api_secret_list(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     let store = app_context::<TursoStore>(cx);
     let secrets = store.secret_list(raw).await.map_err(|e| bad_request(format!("secrets failed: {e}")))?;
     Ok(Json(json!(secrets)))
@@ -1497,6 +1597,7 @@ async fn api_secret_set(Json(req): Json<SecretBody>, cx: &Cx) -> Result<Json<ser
     let raw: &str = path_param::<BoardId>(cx);
     let name: &str = path_param::<Name>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     if req.value.trim().is_empty() {
         return Err(bad_request("value must not be empty").into());
     }
@@ -1511,6 +1612,7 @@ async fn api_secret_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let name: &str = path_param::<Name>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
+    requires_staff(&auth, KeyRole::Reader)?;
     let store = app_context::<TursoStore>(cx);
     let found = store.secret_remove(raw, name).await.map_err(|e| bad_request(format!("secret failed: {e}")))?;
     if !found {
@@ -1520,18 +1622,79 @@ async fn api_secret_remove(cx: &Cx) -> Result<Json<serde_json::Value>> {
 }
 
 /// `POST /api/srv/{board}/events` — dispatch inbound-event recipes.
-/// Body is a raw JSON payload (or `{"payload": {...}}`).
+/// Body is a raw JSON payload (or `{"payload": {...}}`). When the board
+/// has a `webhook_secret` configured, the body must be signed:
+/// `X-Hub-Signature-256: sha256=<hex>` (or `X-Signature: <hex>`), where
+/// `hex = HMAC-SHA256(webhook_secret, raw_body_bytes)` — verified
+/// constant-time so forged webhooks are rejected.
 #[route(POST "/api/srv/{board_id}/events")]
-async fn api_event_inbound(Json(req): Json<Value>, cx: &Cx) -> Result<Json<serde_json::Value>> {
+async fn api_event_inbound(body: Body, cx: &Cx) -> Result<Json<serde_json::Value>> {
     let raw: &str = path_param::<BoardId>(cx);
     let (_board, auth) = api_auth(cx, raw).await?;
-    requires(&auth, KeyRole::Writer)?;
+    requires_staff(&auth, KeyRole::Writer)?;
+    let bytes = topcoat::router::body_limit(cx);
+    let raw_body = topcoat::router::to_bytes(body, bytes).await.map_err(|e| bad_request(format!("body too large: {e}")))?;
+    let store = app_context::<TursoStore>(cx);
+    if let Some(secret) = store.webhook_secret(raw).await {
+        let header = topcoat::router::request::headers(cx)
+            .get("x-hub-signature-256")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.strip_prefix("sha256=").map(str::to_owned).unwrap_or_default())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                topcoat::router::request::headers(cx)
+                    .get("x-signature")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
+        let Some(header) = header else {
+            return Err(unauthorized().into());
+        };
+        if !hmac_eq(&secret, &raw_body, &header) {
+            return Err(unauthorized().into());
+        }
+    }
+    let req: Value = if raw_body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&raw_body).map_err(|e| bad_request(format!("event body: {e}")))?
+    };
     let payload = req.get("payload").cloned().unwrap_or(req);
     let writer = match &auth {
         Some(ApiAuth::Key(key)) => key.writer.as_deref(),
         _ => None,
     };
-    let store = app_context::<TursoStore>(cx);
     store.dispatch_recipes(raw, serverless_recipe::EventKind::Inbound, None, &payload, writer, None).await;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Constant-time HMAC-SHA256 comparison against a hex digest.
+fn hmac_eq(secret: &str, body: &[u8], digest_hex: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<sha2::Sha256>;
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    let out = mac.finalize().into_bytes();
+    let want = out.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    want.len() == digest_hex.len() && want.bytes().zip(digest_hex.bytes()).all(|(a, b)| a == b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_vector_matches_known_digest() {
+        // Wikipedia HMAC-SHA256 example: HMAC(key="key", msg="The quick brown fox...")
+        let body = b"The quick brown fox jumps over the lazy dog";
+        let digest = "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8";
+        assert!(hmac_eq("key", body, digest));
+        assert!(!hmac_eq("key", body, &format!("{}f", digest)));
+        assert!(!hmac_eq("other", body, digest));
+        assert!(!hmac_eq("key", b"tampered", digest));
+    }
 }

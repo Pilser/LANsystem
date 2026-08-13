@@ -596,7 +596,20 @@ impl TursoStore {
             "computed": config_json("computed_json"),
             "validate": config_json("validate_json"),
             "redact": config_json("redact_json"),
+            "webhook_secret_set": meta.get("webhook_secret").is_some_and(|s| !s.is_empty()),
         }))
+    }
+
+    /// The board's inbound webhook secret (`webhook_secret` config key), if
+    /// set — used to verify `POST /events` signatures. Never exposed via
+    /// `board_config` (only the `webhook_secret_set` flag is).
+    pub async fn webhook_secret(&self, board_id: &str) -> Option<String> {
+        Self::read_meta(board_id)
+            .unwrap_or_default()
+            .get("webhook_secret")
+            .cloned()
+            .and_then(|s| Some(serde_json::from_str::<String>(&s).unwrap_or(s)))
+            .filter(|s| !s.is_empty())
     }
 
     /// Set or clear a meta.toml JSON config (`computed_json` / `validate_json`
@@ -787,6 +800,9 @@ impl TursoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::BoardStore;
+    use crate::store::NO_TENANT;
+    use serverless_core::KeyRole;
     use serde_json::json;
 
     /// Isolate meta.toml writes behind a per-test temp data dir.
@@ -849,6 +865,27 @@ mod tests {
         assert!(store.prepare_payload(board, &json!({})).await.is_err());
         assert!(store.prepare_payload(board, &json!({ "x": "nope" })).await.is_err());
         assert!(store.prepare_payload(board, &json!({ "x": 1 })).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn customer_key_scope_round_trips() {
+        let store = test_store();
+        let board = "t-scope";
+        let (bucket, secret) = store
+            .key_issue(NO_TENANT, board, KeyRole::Customer, None, Some("cust-42"))
+            .await
+            .unwrap();
+        let token = format!("{board}:{bucket}:{secret}");
+        let (got_board, key) = store.key_auth(&token).await.unwrap().unwrap();
+        assert_eq!(got_board, board);
+        assert_eq!(key.bucket, bucket);
+        assert_eq!(key.role, KeyRole::Customer);
+        assert_eq!(key.scope.as_deref(), Some("cust-42"));
+        // staff keys carry no scope
+        let (_b2, s2) = store.key_issue(NO_TENANT, board, KeyRole::Writer, Some("me"), None).await.unwrap();
+        let token2 = format!("{board}:{_b2}:{s2}");
+        let (_, k2) = store.key_auth(&token2).await.unwrap().unwrap();
+        assert_eq!(k2.scope, None);
     }
 
     #[tokio::test]

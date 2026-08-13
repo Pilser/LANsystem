@@ -135,8 +135,8 @@ keys `computed_json`, `validate_json`, `redact_json` (empty string = unset).
 
 ### 1.7 HTTP surface (keyed auth; hardening routes have NO role ceiling)
 ```
-GET    /api/srv/{board}/config      computed/validate/redact (board_config, extended)
-PUT    /api/srv/{board}/config      body {computed?, validate?, redact?} (null clears a key)
+GET    /api/srv/{board}/config      computed/validate/redact + webhook_secret_set (never the value)
+PUT    /api/srv/{board}/config      body {computed?, validate?, redact?, webhook_secret?} (null clears a key)
 GET    /api/srv/{board}/recipes                 → {ok, recipes:[...]} (rows incl. actions)
 POST   /api/srv/{board}/recipes     {name, when, match_json?, enabled?, dedup_on?, actions}
 PUT    /api/srv/{board}/recipes/{name}/enabled  {enabled: bool}
@@ -144,22 +144,43 @@ DELETE /api/srv/{board}/recipes/{name}
 GET    /api/srv/{board}/secrets                → {ok, secrets:[{name, fingerprint, created_at}]}
 PUT    /api/srv/{board}/secrets/{name}  {value}  (create or rotate)
 DELETE /api/srv/{board}/secrets/{name}
-POST   /api/srv/{board}/events      raw JSON body (or {payload: {...}}) → when=inbound (writer+)
+POST   /api/srv/{board}/events      raw JSON body (or {payload: {...}}) → when=inbound (writer+;
+                                     HMAC-verified when webhook_secret is set)
 ```
 The config/recipes/secrets routes drop the `requires(Admin)` gate — any valid
-space key (reader/writer/admin) can manage them; only `/events` still needs
-writer+. `when` values: `record.created|record.updated|
-record.deleted|inbound|cron:<job.name>` — anything else is skipped at dispatch. Config GET
-(extend `board_config` in ops.rs) already returns computed/validate/redact.
+space key (reader/writer/admin) can manage them, but `customer` keys NEVER
+pass (staff surfaces only). `when` values: `record.created|record.updated|
+record.deleted|inbound|cron:<job.name>` — anything else is skipped at dispatch.
+`POST /events` needs writer+ and, when `webhook_secret` is set, a valid
+`X-Hub-Signature-256: sha256=<hex>` (or `X-Signature: <hex>`) HMAC-SHA256 of
+the raw body — unsigned/forged requests get 401. Config GET (extend
+`board_config` in ops.rs) already returns computed/validate/redact.
 
 ### 1.8 CLI verbs (`cli` single MCP tool; hardening verbs, no role ceiling)
 ```
-cli space config set --computed '<json>' [--validate '<json>'] [--redact '<json>']
-cli space config clear --computed|--validate|--redact
+cli space config set --computed '<json>' [--validate '<json>'] [--redact '<json>'] \
+       [--webhook-secret '<secret>']
+cli space config clear --computed|--validate|--redact|--webhook-secret
 cli space recipes list | add --name n --when w [--match '<json>'] [--dedup-on <path>] [--disabled] --actions '<json>' | enable|disable --name n | remove --name n
 cli space secrets list | set --name N --value v | remove --name N
 ```
 Help layers: GLOBAL_USAGE/SPACE_USAGE group lines + verb_help entries (all public).
+
+### 1.7b Customer-scoped keys (gap 5)
+
+`role: "customer"` keys are storefront credentials: they read/write only
+records whose `payload.customer_id == <scope>` and nothing else.
+- Issue: `POST /api/srv/{board}/keys {"role":"customer","scope":"<id>"}` or
+  `cli keys issue --role customer --scope <id>` (admin). The scope is bound at
+  issue time and never changeable.
+- Reads: `records list/get/search/query/filter` return only scoped records.
+- Writes: `insert/bulk` force `payload.customer_id = <scope>`; `set/patch/
+  delete` on any record not carrying the scope 404.
+- Blocked for customer keys (403): config/recipes/secrets/keys/hooks/events
+  (requires_staff), aggregate, links (get/set/clear), call, delete-filter,
+  and every CLI verb (the CLI is staff-only).
+- The webhook HMAC secret is stored in meta.toml JSON-encoded; `webhook_secret()`
+  decodes one layer so string secrets round-trip exactly.
 
 ### 1.9 Console (`/sl/{board}`)
 - "Write rules" panel: computed/validate/redact textareas (set + clear-all buttons)

@@ -50,6 +50,10 @@ pub struct SrvApiKey {
     /// Fixed writer identity stamped on records written with this key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub writer: Option<String>,
+    /// Customer scope id (role `customer`): the key may only read/create
+    /// records whose `payload.customer_id == scope`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
@@ -65,6 +69,10 @@ pub enum KeyRole {
     Writer,
     /// Everything, including issuing/revoking keys and hooks.
     Admin,
+    /// A storefront customer: reads/writes only its own records (enforced
+    /// server-side via `scope`); never staff surfaces (rules/recipes/
+    /// secrets/config/keys/events).
+    Customer,
 }
 
 impl KeyRole {
@@ -73,6 +81,7 @@ impl KeyRole {
             KeyRole::Reader => "reader",
             KeyRole::Writer => "writer",
             KeyRole::Admin => "admin",
+            KeyRole::Customer => "customer",
         }
     }
 }
